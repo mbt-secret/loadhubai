@@ -1,0 +1,545 @@
+import express from 'express';
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import {
+  clearLocalData,
+  createSavedSearch,
+  defaultWhatsappProfileDir,
+  findFtsCandidateIds,
+  getLoad,
+  getSettings,
+  listAllLoads,
+  listGroups,
+  listLoads,
+  listSavedSearches,
+  nowIso,
+  openDatabase,
+  saveParsedMessage,
+  updateGroup,
+  updateLoad,
+  updateSavedSearch,
+  updateSettings,
+  upsertGroup,
+  deleteSavedSearch
+} from './db.mjs';
+import { createEventHub } from './events.mjs';
+import { ANALYSIS_VERSION, analyzeMessage, testAiConnection } from './ai.mjs';
+import { buildFtsQuery, filterLoadsByMessageAge, savedSearchMatchesLoad, searchLoads, searchLoadsStructured } from './search.mjs';
+import { fetchGeotransCargo, GEOTRANS_SOURCE_NAME, mapGeotransCargoItem } from './geotrans.mjs';
+import { findPlaceCoordinates, loadPlacesIntoParser, placeStats, searchPlaces } from './places.mjs';
+import { WhatsappAdapter } from './whatsapp.mjs';
+
+const rootDir = resolve(fileURLToPath(new URL('../..', import.meta.url)));
+const distDir = resolve(rootDir, 'dist');
+const port = Number(process.env.PORT ?? 3000);
+const host = process.env.HOST ?? (process.env.NODE_ENV === 'production' ? '0.0.0.0' : '127.0.0.1');
+const geotransAutoSyncIntervalMs = 5 * 60 * 1000;
+
+const db = openDatabase(process.env.LOADHUB_DB_PATH);
+loadPlacesIntoParser(db);
+const events = createEventHub();
+let geotransSyncInFlight = null;
+
+function publicSettings(settings) {
+  const { aiApiKey, ...rest } = settings;
+  return { ...rest, aiApiKey: '', aiApiKeySet: Boolean(aiApiKey) };
+}
+
+function emitSettingsUpdated(settings = getSettings(db)) {
+  events.emit({ type: 'settings:updated', settings: publicSettings(settings) });
+}
+
+function resolveLoadCoord(load) {
+  const lat = Number(load.loadLat);
+  const lng = Number(load.loadLon);
+  if (Number.isFinite(lat) && Number.isFinite(lng)) return { lat, lng };
+  const coords = findPlaceCoordinates(db, load.loadCity, load.loadCountry);
+  return coords ? { lat: coords.lat, lng: coords.lon } : null;
+}
+
+function isVisibleWhatsappGroup(group) {
+  const rawName = String(group.name ?? '');
+  const name = rawName.trim();
+  const normalized = name.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
+  const keywords = [
+    'curs',
+    'transport',
+    'logistic',
+    'lojistik',
+    'locistik',
+    'nakliye',
+    'yuk',
+    'yük',
+    'marf',
+    'gruz',
+    'груз',
+    'perevoz',
+    'перевоз',
+    'incarc',
+    'tir',
+    'camion',
+    'lkw',
+    'truck',
+    'dorse',
+    'bursa',
+    'sped',
+    'cargo',
+    'frigo',
+    'transfer',
+    'tasimacilik',
+    'taşımac',
+    'tasıma'
+  ];
+  const routeWords = ['romania', 'turcia', 'turkiye', 'ukraina', 'germania', 'italia', 'bulgaria', 'avrupa', 'europa', 'balkan'];
+
+  if (!name || /[\r\n\u202A-\u202E]/.test(rawName)) return false;
+  if (/^\+?[\d\s().-]{7,}$/.test(name)) return false;
+  if (/^\d{1,2}:\d{2}$/.test(name)) return false;
+  if (/^\d+\s*(mesaje?|messages?)$/i.test(name)) return false;
+  if (keywords.some((keyword) => normalized.includes(keyword))) return true;
+
+  const routeHits = routeWords.filter((word) => normalized.includes(word)).length;
+  return routeHits >= 2;
+}
+
+function listVisibleGroups() {
+  return listGroups(db).filter(isVisibleWhatsappGroup);
+}
+
+function listAlertMatches({ limit = 20 } = {}) {
+  const settings = getSettings(db);
+  const savedSearches = settings.notificationsEnabled
+    ? listSavedSearches(db).filter((search) => search.notificationsEnabled)
+    : [];
+  const recentLoads = listLoads(db, { limit: 500 });
+
+  if (!settings.notificationsEnabled || savedSearches.length === 0) return [];
+
+  const byId = new Map();
+  for (const search of savedSearches) {
+    for (const load of recentLoads) {
+      if (savedSearchMatchesLoad(load, search)) byId.set(load.id, load);
+    }
+  }
+
+  return Array.from(byId.values())
+    .sort((a, b) => new Date(b.capturedAt).getTime() - new Date(a.capturedAt).getTime())
+    .slice(0, limit);
+}
+
+async function handleIncomingMessage(message) {
+  const settings = getSettings(db);
+  const analysis = await analyzeMessage(message.text, settings);
+  const parsed = {
+    ...analysis.parsed,
+    ...(message.parsedPatch ?? {}),
+    detectedLanguage: analysis.detectedLanguage,
+    translatedText: analysis.translatedText,
+    aiSummary: message.parsedPatch
+      ? [
+          [message.parsedPatch.loadCity, message.parsedPatch.loadCountry].filter(Boolean).join(', '),
+          [message.parsedPatch.unloadCity, message.parsedPatch.unloadCountry].filter(Boolean).join(', ')
+        ].filter(Boolean).join(' -> ') || analysis.aiSummary
+      : analysis.aiSummary,
+    aiProvider: analysis.aiProvider,
+    analysisVersion: analysis.analysisVersion
+  };
+  const result = saveParsedMessage(db, message, parsed);
+  const group = result.group ? updateGroup(db, result.group.id, { lastSyncAt: nowIso() }) : null;
+
+  if (result.inserted && result.load) {
+    const savedSearches = listSavedSearches(db);
+    const settings = getSettings(db);
+    const matchedSearches = settings.notificationsEnabled
+      ? savedSearches.filter((search) => savedSearchMatchesLoad(result.load, search))
+      : [];
+    events.emit({ type: 'load:new', load: result.load, matchedSearches });
+  }
+
+  if (group) events.emit({ type: 'groups:updated' });
+  return result;
+}
+
+async function syncGeotransLoads({ pageSize = 50 } = {}) {
+  const settings = getSettings(db);
+  if (!settings.geotransEnabled) {
+    throw new Error('Activeaza GeoTrans.md in setari inainte de import.');
+  }
+
+  const source = await fetchGeotransCargo({ pageSize });
+  let inserted = 0;
+  let seen = 0;
+
+  for (const item of source.items) {
+    const message = mapGeotransCargoItem(item);
+    const result = await handleIncomingMessage({
+      ...message,
+      capturedAt: nowIso()
+    });
+    seen += 1;
+    if (result.inserted) inserted += 1;
+  }
+
+  const lastSyncAt = nowIso();
+  const nextSettings = updateSettings(db, {
+    geotransLastSyncAt: lastSyncAt,
+    geotransLastSyncCount: inserted,
+    geotransLastSyncError: ''
+  });
+
+  events.emit({ type: 'groups:updated' });
+  emitSettingsUpdated(nextSettings);
+
+  return {
+    source: GEOTRANS_SOURCE_NAME,
+    totalAvailable: source.totalItems,
+    checked: seen,
+    inserted,
+    lastSyncAt,
+    settings: publicSettings(nextSettings)
+  };
+}
+
+async function runGeotransSync({ pageSize = 50 } = {}) {
+  if (geotransSyncInFlight) return geotransSyncInFlight;
+  geotransSyncInFlight = syncGeotransLoads({ pageSize }).finally(() => {
+    geotransSyncInFlight = null;
+  });
+  return geotransSyncInFlight;
+}
+
+function recordGeotransSyncError(error) {
+  const message = error?.message ?? 'Importul GeoTrans.md a esuat.';
+  const nextSettings = updateSettings(db, {
+    geotransLastSyncError: message
+  });
+  emitSettingsUpdated(nextSettings);
+  return message;
+}
+
+function startGeotransAutoSync() {
+  setInterval(() => {
+    const settings = getSettings(db);
+    if (!settings.geotransEnabled) return;
+
+    runGeotransSync({ pageSize: 50 }).catch((error) => {
+      const message = recordGeotransSyncError(error);
+      events.emit({ type: 'error', message });
+    });
+  }, geotransAutoSyncIntervalMs);
+}
+
+function analysisToLoadPatch(analysis) {
+  return {
+    ...analysis.parsed,
+    detectedLanguage: analysis.detectedLanguage,
+    translatedText: analysis.translatedText,
+    aiSummary: analysis.aiSummary,
+    aiProvider: analysis.aiProvider,
+    analysisVersion: analysis.analysisVersion
+  };
+}
+
+async function reanalyzeAllLoads({ onlyOutdated = false } = {}) {
+  const settings = getSettings(db);
+  const loads = listAllLoads(db);
+  let updated = 0;
+
+  for (const load of loads) {
+    if (onlyOutdated && load.analysisVersion === ANALYSIS_VERSION) continue;
+    const analysis = await analyzeMessage(load.originalText, settings);
+    updateLoad(db, load.id, analysisToLoadPatch(analysis), { markManual: false });
+    updated += 1;
+  }
+
+  updateSettings(db, {
+    analysisVersion: ANALYSIS_VERSION,
+    lastAnalysisBackfillAt: nowIso()
+  });
+
+  return {
+    total: loads.length,
+    updated,
+    analysisVersion: ANALYSIS_VERSION
+  };
+}
+
+const whatsapp = new WhatsappAdapter({
+  profileDir: defaultWhatsappProfileDir,
+  activeGroupsProvider: () => listVisibleGroups().filter((group) => group.isActive),
+  onGroups: (groups) => {
+    for (const group of groups) upsertGroup(db, group);
+    events.emit({ type: 'groups:updated' });
+  },
+  onMessage: handleIncomingMessage
+});
+
+whatsapp.on('status', (status) => events.emit({ type: 'status', status }));
+whatsapp.on('error', (error) => events.emit({ type: 'error', message: error.message }));
+
+const app = express();
+app.use(express.json({ limit: '1mb' }));
+
+app.get('/api/events', (req, res) => {
+  events.connect(res);
+});
+
+app.get('/api/whatsapp/status', (req, res) => {
+  res.json(whatsapp.getStatus());
+});
+
+app.post('/api/whatsapp/connect', async (req, res, next) => {
+  try {
+    res.json(await whatsapp.connect());
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/whatsapp/disconnect', async (req, res, next) => {
+  try {
+    res.json(await whatsapp.disconnect());
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/groups', (req, res) => {
+  res.json(listVisibleGroups());
+});
+
+app.post('/api/groups/refresh', async (req, res, next) => {
+  try {
+    await whatsapp.refreshGroups();
+
+    if (!whatsapp.getStatus().connected) {
+      return res.status(400).json({ error: 'WhatsApp nu este conectat. Conecteaza WhatsApp Web inainte de actualizarea grupurilor.' });
+    }
+
+    res.json(listVisibleGroups());
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch('/api/groups/:id', async (req, res, next) => {
+  try {
+    const group = updateGroup(db, Number(req.params.id), req.body);
+    if (!group) return res.status(404).json({ error: 'Grupul nu a fost gasit.' });
+
+    if (group.isActive && whatsapp.getStatus().connected) {
+      whatsapp.importGroupMessages(group).catch((error) => events.emit({ type: 'error', message: error.message }));
+    }
+
+    events.emit({ type: 'groups:updated' });
+    res.json(group);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/places', (req, res) => {
+  const type = String(req.query.type ?? 'city');
+  const q = String(req.query.q ?? '');
+  const limit = Math.min(Number(req.query.limit ?? 50), 100);
+  res.json({
+    items: searchPlaces(db, { q, type, limit }),
+    stats: placeStats(db)
+  });
+});
+
+app.get('/api/loads', (req, res) => {
+  const query = String(req.query.q ?? '').trim();
+  const limit = Math.min(Number(req.query.limit ?? 200), 500);
+  const messageAge = String(req.query.messageAge ?? '').trim();
+  const filters = {
+    origin: String(req.query.origin ?? '').trim(),
+    destination: String(req.query.destination ?? '').trim(),
+    destinationType: String(req.query.destinationType ?? '').trim(),
+    truckType: String(req.query.truckType ?? '').trim(),
+    weight: String(req.query.weight ?? '').trim(),
+    cargoType: String(req.query.cargoType ?? '').trim(),
+    loadDate: String(req.query.loadDate ?? '').trim(),
+    price: String(req.query.price ?? '').trim()
+  };
+  const radiusKm = Number(req.query.radiusKm ?? 0);
+  const originLat = Number(req.query.originLat);
+  const originLng = Number(req.query.originLng);
+  let geo = null;
+  if (Number.isFinite(radiusKm) && radiusKm > 0) {
+    if (Number.isFinite(originLat) && Number.isFinite(originLng)) {
+      geo = { lat: originLat, lng: originLng, radiusKm };
+    } else if (filters.origin) {
+      const [originCity, originCountry] = filters.origin.split(',').map((part) => part.trim());
+      const coords = findPlaceCoordinates(db, originCity, originCountry);
+      if (coords) geo = { lat: coords.lat, lng: coords.lon, radiusKm };
+    }
+  }
+  const hasStructuredFilters = Object.values(filters).some(Boolean) || Boolean(geo);
+  const ftsIds = query ? findFtsCandidateIds(db, buildFtsQuery(query), 500) : [];
+  const byFts = ftsIds.length > 0 ? listLoads(db, { limit: 500, candidateIds: ftsIds }) : [];
+  const broad = listLoads(db, { limit: query || hasStructuredFilters || messageAge ? 500 : limit });
+  const merged = Array.from(new Map([...byFts, ...broad].map((load) => [load.id, load])).values());
+  const recent = filterLoadsByMessageAge(merged, messageAge);
+  const structured = hasStructuredFilters
+    ? searchLoadsStructured(recent, { ...filters, geo }, { resolveLoadCoord })
+    : recent;
+  const loads = (query ? searchLoads(structured, query) : structured).slice(0, limit);
+  res.json(loads);
+});
+
+app.get('/api/loads/:id', (req, res) => {
+  const load = getLoad(db, Number(req.params.id));
+  if (!load) return res.status(404).json({ error: 'Cursa nu a fost gasita.' });
+  res.json(load);
+});
+
+app.patch('/api/loads/:id', (req, res) => {
+  const load = updateLoad(db, Number(req.params.id), req.body);
+  if (!load) return res.status(404).json({ error: 'Cursa nu a fost gasita.' });
+  res.json(load);
+});
+
+app.post('/api/ai/analyze', async (req, res, next) => {
+  try {
+    const settings = getSettings(db);
+    const loadId = req.body.loadId ? Number(req.body.loadId) : null;
+    const sourceText = loadId ? getLoad(db, loadId)?.originalText : req.body.text;
+    if (!sourceText) return res.status(400).json({ error: 'Textul pentru analiza lipseste.' });
+
+    const analysis = await analyzeMessage(sourceText, settings);
+    if (!loadId) return res.json(analysis);
+
+    const updated = updateLoad(db, loadId, analysisToLoadPatch(analysis), { markManual: false });
+    res.json({ ...analysis, load: updated });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/ai/reanalyze-all', async (req, res, next) => {
+  try {
+    const result = await reanalyzeAllLoads({ onlyOutdated: Boolean(req.body?.onlyOutdated) });
+    events.emit({ type: 'loads:reanalyzed', result });
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/ai/test', async (req, res, next) => {
+  try {
+    const settings = updateSettings(db, req.body ?? {});
+    res.json(await testAiConnection(settings));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/searches', (req, res) => {
+  res.json(listSavedSearches(db));
+});
+
+app.get('/api/searches/matches', (req, res) => {
+  res.json(listAlertMatches({ limit: Math.min(Number(req.query.limit ?? 20), 100) }));
+});
+
+app.post('/api/searches', (req, res, next) => {
+  try {
+    createSavedSearch(db, req.body.query, req.body.notificationsEnabled ?? true);
+    res.status(201).json(listSavedSearches(db).find((search) => search.query === String(req.body.query ?? '').trim()));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch('/api/searches/:id', (req, res) => {
+  const search = updateSavedSearch(db, Number(req.params.id), req.body);
+  if (!search) return res.status(404).json({ error: 'Cautarea salvata nu a fost gasita.' });
+  res.json(search);
+});
+
+app.delete('/api/searches/:id', (req, res) => {
+  deleteSavedSearch(db, Number(req.params.id));
+  res.status(204).end();
+});
+
+app.get('/api/settings', (req, res) => {
+  res.json(publicSettings(getSettings(db)));
+});
+
+app.patch('/api/settings', (req, res) => {
+  const before = getSettings(db);
+  const nextSettings = updateSettings(db, req.body);
+  const publicNextSettings = publicSettings(nextSettings);
+  emitSettingsUpdated(nextSettings);
+  res.json(publicNextSettings);
+
+  if (!before.geotransEnabled && nextSettings.geotransEnabled) {
+    runGeotransSync({ pageSize: 50 }).catch((error) => {
+      const message = recordGeotransSyncError(error);
+      events.emit({ type: 'error', message });
+    });
+  }
+});
+
+app.post('/api/geotrans/sync', async (req, res, next) => {
+  try {
+    res.json(await runGeotransSync({ pageSize: Math.min(Number(req.body?.pageSize ?? 50), 100) }));
+  } catch (error) {
+    recordGeotransSyncError(error);
+    next(error);
+  }
+});
+
+app.delete('/api/local-data', async (req, res, next) => {
+  try {
+    await whatsapp.disconnect();
+    clearLocalData(db, { clearWhatsappProfile: true, profileDir: defaultWhatsappProfileDir });
+    events.emit({ type: 'groups:updated' });
+    res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+
+if (process.env.NODE_ENV !== 'production') {
+  app.post('/api/dev/messages', async (req, res, next) => {
+    try {
+      const result = await handleIncomingMessage({
+        groupName: req.body.groupName ?? 'Demo curse Europa',
+        groupWhatsappId: req.body.groupWhatsappId ?? 'demo',
+        text: req.body.text,
+        author: req.body.author ?? 'Demo',
+        messageTime: req.body.messageTime ?? nowIso(),
+        capturedAt: nowIso()
+      });
+      res.status(result.inserted ? 201 : 200).json(result.load);
+    } catch (error) {
+      next(error);
+    }
+  });
+}
+
+app.use('/api', (req, res) => {
+  res.status(404).json({ error: 'Endpoint API necunoscut. Reporneste serverul local daca ai actualizat aplicatia recent.' });
+});
+
+if (existsSync(distDir)) {
+  app.use(express.static(distDir));
+  app.get(/.*/, (req, res) => {
+    res.sendFile(resolve(distDir, 'index.html'));
+  });
+}
+
+app.use((error, req, res, next) => {
+  console.error(error);
+  res.status(500).json({ error: error.message ?? 'Eroare interna.' });
+});
+
+startGeotransAutoSync();
+
+app.listen(port, host, () => {
+  console.log(`LoadHUB AI server: http://${host}:${port}`);
+});
