@@ -9,6 +9,7 @@
     "start": "node src/server/index.mjs",
     "server": "node src/server/index.mjs",
     "import:places": "node scripts/import-geonames-cities.mjs",
+    "install:chromium": "playwright-core install chromium",
     "build": "vite build",
     "preview": "node src/server/index.mjs",
     "test": "node --test tests/*.test.mjs"

@@ -3,6 +3,7 @@ export type WhatsappStatus = {
   state: 'disconnected' | 'starting' | 'qr' | 'connected' | 'error';
   message: string;
   lastSyncAt?: string | null;
+  qrCodeDataUrl?: string | null;
 };
 
 export type Group = {

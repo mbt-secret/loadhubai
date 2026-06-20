@@ -1161,11 +1161,15 @@ function ConnectScreen({
     <section className="screen-stack">
       <ScreenHeader title="Conectează WhatsApp" subtitle="Scaneaza codul QR si lasa aplicatia sa citeasca grupurile active." />
       <div className="qr-card">
-        <div className="qr-mock" aria-label="QR WhatsApp">
-          {Array.from({ length: 49 }).map((_, index) => (
-            <span key={index} className={(index * 7 + index) % 5 < 2 ? 'dark' : ''} />
-          ))}
-        </div>
+        {status.qrCodeDataUrl ? (
+          <img className="qr-image" src={status.qrCodeDataUrl} alt="Cod QR WhatsApp" />
+        ) : (
+          <div className="qr-mock" aria-label="QR WhatsApp">
+            {Array.from({ length: 49 }).map((_, index) => (
+              <span key={index} className={(index * 7 + index) % 5 < 2 ? 'dark' : ''} />
+            ))}
+          </div>
+        )}
         <button className={status.connected ? 'success-button wide' : 'primary-button wide'} onClick={status.connected ? onDisconnect : onConnect} disabled={loading}>
           {status.connected ? <Check size={18} /> : <MessageCircle size={18} />}
           {status.connected ? 'Conectat' : 'Conectează WhatsApp'}
@@ -2730,6 +2734,12 @@ function SettingsScreen({
           })}
         </div>
         <p className="help-text compact">{status.message}</p>
+        {status.qrCodeDataUrl && !status.connected && (
+          <div className="whatsapp-qr-card">
+            <img className="qr-image compact" src={status.qrCodeDataUrl} alt="Cod QR WhatsApp" />
+            <small>Scaneaza codul din WhatsApp: Dispozitive asociate &gt; Asociaza un dispozitiv.</small>
+          </div>
+        )}
         {connectionPanel === 'whatsapp' && (
           <div className="connection-panel">
             <div className="settings-section-head">

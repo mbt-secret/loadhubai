@@ -1975,6 +1975,40 @@ button:disabled {
   background: #16141f;
 }
 
+.qr-image {
+  width: 188px;
+  height: 188px;
+  border-radius: 18px;
+  background: #fff;
+  object-fit: contain;
+  padding: 8px;
+}
+
+.qr-image.compact {
+  width: 164px;
+  height: 164px;
+  border-radius: 14px;
+}
+
+.whatsapp-qr-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-field);
+  background: var(--surface);
+}
+
+.whatsapp-qr-card small {
+  max-width: 260px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.35;
+  text-align: center;
+}
+
 .help-text {
   font-size: 0.8rem;
   color: var(--muted);

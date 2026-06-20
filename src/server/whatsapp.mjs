@@ -21,6 +21,12 @@ function findChromeExecutable() {
   return candidates.find((candidate) => existsSync(candidate)) ?? undefined;
 }
 
+function shouldRunHeadless() {
+  const raw = process.env.WHATSAPP_HEADLESS;
+  if (raw != null) return !/^(0|false|no)$/i.test(raw.trim());
+  return process.env.NODE_ENV === 'production';
+}
+
 function parseWhatsappPrePlainText(value) {
   const match = String(value ?? '').match(/^\[(.+?)\]\s*([^:]+)?:?\s*$/);
   if (!match) return { messageTime: null, author: null };
@@ -54,11 +60,13 @@ export class WhatsappAdapter extends EventEmitter {
     this.context = null;
     this.page = null;
     this.monitorTimer = null;
+    this.qrTimer = null;
     this.status = {
       connected: false,
       state: 'disconnected',
       message: 'WhatsApp nu este conectat.',
-      lastSyncAt: null
+      lastSyncAt: null,
+      qrCodeDataUrl: null
     };
   }
 
@@ -67,7 +75,11 @@ export class WhatsappAdapter extends EventEmitter {
   }
 
   setStatus(patch) {
-    this.status = { ...this.status, ...patch };
+    const nextStatus = { ...this.status, ...patch };
+    if (patch.state && patch.state !== 'qr' && patch.qrCodeDataUrl === undefined) {
+      nextStatus.qrCodeDataUrl = null;
+    }
+    this.status = nextStatus;
     this.emit('status', this.getStatus());
   }
 
@@ -83,13 +95,14 @@ export class WhatsappAdapter extends EventEmitter {
 
     const executablePath = findChromeExecutable();
     const { chromium } = await import('playwright-core');
+    const headless = shouldRunHeadless();
 
     try {
       this.context = await chromium.launchPersistentContext(this.profileDir, {
-        headless: false,
+        headless,
         executablePath,
         viewport: { width: 1280, height: 900 },
-        args: ['--disable-dev-shm-usage', '--no-first-run']
+        args: ['--disable-dev-shm-usage', '--no-first-run', '--no-sandbox', '--disable-setuid-sandbox']
       });
     } catch (error) {
       const message = String(error?.message ?? error);
@@ -106,6 +119,16 @@ export class WhatsappAdapter extends EventEmitter {
         return this.getStatus();
       }
 
+      if (/executable doesn't exist|playwright.*install|download new browsers/i.test(message)) {
+        this.setStatus({
+          connected: false,
+          state: 'error',
+          message:
+            'Chromium nu este instalat pe server. In cPanel ruleaza scriptul install:chromium din Run JS script, apoi reporneste aplicatia.'
+        });
+        return this.getStatus();
+      }
+
       this.setStatus({
         connected: false,
         state: 'error',
@@ -118,6 +141,7 @@ export class WhatsappAdapter extends EventEmitter {
     this.page.on('close', () => {
       this.context = null;
       this.page = null;
+      this.stopQrMonitor();
       this.stopMonitor();
       this.setStatus({
         connected: false,
@@ -130,10 +154,18 @@ export class WhatsappAdapter extends EventEmitter {
     this.setStatus({
       connected: false,
       state: 'qr',
-      message: 'Scaneaza codul QR in fereastra Chrome deschisa.'
+      message: headless
+        ? 'Scaneaza codul QR afisat aici cu WhatsApp de pe telefon.'
+        : 'Scaneaza codul QR in fereastra Chrome deschisa.'
     });
+    await this.page
+      .waitForSelector('canvas, #pane-side, [aria-label*="Chat"], [aria-label*="chat"]', { timeout: 30000 })
+      .catch(() => {});
+    await this.updateQrCode().catch(() => {});
+    this.startQrMonitor();
 
     this.waitForReady().catch((error) => {
+      this.stopQrMonitor();
       this.setStatus({
         connected: false,
         state: 'error',
@@ -157,6 +189,7 @@ export class WhatsappAdapter extends EventEmitter {
       { timeout: 300000 }
     );
 
+    this.stopQrMonitor();
     this.setStatus({
       connected: true,
       state: 'connected',
@@ -168,6 +201,7 @@ export class WhatsappAdapter extends EventEmitter {
   }
 
   async disconnect() {
+    this.stopQrMonitor();
     this.stopMonitor();
     if (this.context) {
       await this.context.close();
@@ -180,6 +214,46 @@ export class WhatsappAdapter extends EventEmitter {
       message: 'WhatsApp a fost deconectat.'
     });
     return this.getStatus();
+  }
+
+  async updateQrCode() {
+    if (!this.page || this.status.connected) return;
+
+    const ready = await this.page
+      .locator('#pane-side, [aria-label*="Chat"], [aria-label*="chat"]')
+      .first()
+      .count()
+      .catch(() => 0);
+    if (ready) return;
+
+    const canvas = this.page.locator('canvas').first();
+    const count = await canvas.count().catch(() => 0);
+    if (!count) return;
+
+    const png = await canvas.screenshot({ type: 'png' }).catch(() => null);
+    if (!png) return;
+
+    const qrCodeDataUrl = `data:image/png;base64,${png.toString('base64')}`;
+    if (qrCodeDataUrl && qrCodeDataUrl !== this.status.qrCodeDataUrl) {
+      this.setStatus({
+        connected: false,
+        state: 'qr',
+        message: 'Scaneaza codul QR afisat aici cu WhatsApp de pe telefon.',
+        qrCodeDataUrl
+      });
+    }
+  }
+
+  startQrMonitor() {
+    this.stopQrMonitor();
+    this.qrTimer = setInterval(() => {
+      this.updateQrCode().catch((error) => this.emit('error', error));
+    }, 3000);
+  }
+
+  stopQrMonitor() {
+    if (this.qrTimer) clearInterval(this.qrTimer);
+    this.qrTimer = null;
   }
 
   async refreshGroups() {
