@@ -38,6 +38,9 @@ test('maps a GeoTrans cargo item to a local load message with structured route d
   assert.equal(message.parsedPatch.loadCountry, 'Romania');
   assert.equal(message.parsedPatch.unloadCity, 'Chisinau');
   assert.equal(message.parsedPatch.unloadCountry, 'Moldova');
+  assert.equal(typeof message.parsedPatch.loadLat, 'number');
+  assert.equal(typeof message.parsedPatch.loadLon, 'number');
+  assert.ok(Math.abs(message.parsedPatch.unloadLat - 47.0105) < 0.01);
   assert.equal(message.parsedPatch.loadDate, '2026-06-17');
   assert.equal(message.parsedPatch.truckType, 'Prelata');
   assert.equal(message.parsedPatch.weightTons, 20);

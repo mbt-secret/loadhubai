@@ -29,6 +29,7 @@ import { buildFtsQuery, filterLoadsByMessageAge, savedSearchMatchesLoad, searchL
 import { fetchGeotransCargo, GEOTRANS_SOURCE_NAME, mapGeotransCargoItem } from './geotrans.mjs';
 import { findPlaceCoordinates, loadPlacesIntoParser, placeStats, searchPlaces } from './places.mjs';
 import { WhatsappAdapter } from './whatsapp.mjs';
+import { resolveKnownCoordinates } from './coordinates.mjs';
 
 const rootDir = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const distDir = resolve(rootDir, 'dist');
@@ -51,11 +52,31 @@ function emitSettingsUpdated(settings = getSettings(db)) {
 }
 
 function resolveLoadCoord(load) {
-  const lat = Number(load.loadLat);
-  const lng = Number(load.loadLon);
+  const lat = load.loadLat == null ? NaN : Number(load.loadLat);
+  const lng = load.loadLon == null ? NaN : Number(load.loadLon);
   if (Number.isFinite(lat) && Number.isFinite(lng)) return { lat, lng };
-  const coords = findPlaceCoordinates(db, load.loadCity, load.loadCountry);
+  const coords = findPlaceCoordinates(db, load.loadCity, load.loadCountry) ?? resolveKnownCoordinates(load.loadCity, load.loadCountry);
   return coords ? { lat: coords.lat, lng: coords.lon } : null;
+}
+
+function resolvePointCoord(latValue, lonValue, cityName, countryName) {
+  const lat = latValue == null ? NaN : Number(latValue);
+  const lon = lonValue == null ? NaN : Number(lonValue);
+  if (Number.isFinite(lat) && Number.isFinite(lon)) return { lat, lon };
+  return findPlaceCoordinates(db, cityName, countryName) ?? resolveKnownCoordinates(cityName, countryName);
+}
+
+function withResolvedCoordinates(load) {
+  if (!load) return load;
+  const loadCoords = resolvePointCoord(load.loadLat, load.loadLon, load.loadCity, load.loadCountry);
+  const unloadCoords = resolvePointCoord(load.unloadLat, load.unloadLon, load.unloadCity, load.unloadCountry);
+  return {
+    ...load,
+    loadLat: loadCoords?.lat ?? load.loadLat,
+    loadLon: loadCoords?.lon ?? load.loadLon,
+    unloadLat: unloadCoords?.lat ?? load.unloadLat,
+    unloadLon: unloadCoords?.lon ?? load.unloadLon
+  };
 }
 
 function isVisibleWhatsappGroup(group) {
@@ -125,7 +146,8 @@ function listAlertMatches({ limit = 20 } = {}) {
 
   return Array.from(byId.values())
     .sort((a, b) => new Date(b.capturedAt).getTime() - new Date(a.capturedAt).getTime())
-    .slice(0, limit);
+    .slice(0, limit)
+    .map(withResolvedCoordinates);
 }
 
 async function handleIncomingMessage(message) {
@@ -154,7 +176,7 @@ async function handleIncomingMessage(message) {
     const matchedSearches = settings.notificationsEnabled
       ? savedSearches.filter((search) => savedSearchMatchesLoad(result.load, search))
       : [];
-    events.emit({ type: 'load:new', load: result.load, matchedSearches });
+    events.emit({ type: 'load:new', load: withResolvedCoordinates(result.load), matchedSearches });
   }
 
   if (group) events.emit({ type: 'groups:updated' });
@@ -386,19 +408,19 @@ app.get('/api/loads', (req, res) => {
     ? searchLoadsStructured(recent, { ...filters, geo }, { resolveLoadCoord })
     : recent;
   const loads = (query ? searchLoads(structured, query) : structured).slice(0, limit);
-  res.json(loads);
+  res.json(loads.map(withResolvedCoordinates));
 });
 
 app.get('/api/loads/:id', (req, res) => {
   const load = getLoad(db, Number(req.params.id));
   if (!load) return res.status(404).json({ error: 'Cursa nu a fost gasita.' });
-  res.json(load);
+  res.json(withResolvedCoordinates(load));
 });
 
 app.patch('/api/loads/:id', (req, res) => {
   const load = updateLoad(db, Number(req.params.id), req.body);
   if (!load) return res.status(404).json({ error: 'Cursa nu a fost gasita.' });
-  res.json(load);
+  res.json(withResolvedCoordinates(load));
 });
 
 app.post('/api/ai/analyze', async (req, res, next) => {

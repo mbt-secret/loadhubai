@@ -1,3 +1,5 @@
+import { resolveKnownCoordinates } from './coordinates.mjs';
+
 export const GEOTRANS_SOURCE_NAME = 'GeoTrans.md';
 export const GEOTRANS_SOURCE_ID = 'source:geotrans.md';
 
@@ -106,6 +108,13 @@ function truckTypeFrom(item) {
   return mapped[0] ?? null;
 }
 
+function pointCoordinates(point) {
+  const lat = Number(point?.lat ?? point?.latitude ?? point?.geoLat);
+  const lon = Number(point?.lon ?? point?.lng ?? point?.longitude ?? point?.geoLon);
+  if (Number.isFinite(lat) && Number.isFinite(lon)) return { lat, lon };
+  return resolveKnownCoordinates(cityName(point), countryName(point));
+}
+
 function originalTextFrom(item) {
   const from = [cityName(item.from), countryName(item.from)].filter(Boolean).join(', ');
   const to = [cityName(item.to), countryName(item.to)].filter(Boolean).join(', ');
@@ -131,11 +140,17 @@ export function mapGeotransCargoItem(item) {
   const messageTime = item.refDate ?? item.updateDate ?? item.createDate ?? item.insertedOn ?? null;
   const price = clean(item.cargo?.price);
   const weightTons = Number(item.cargo?.weight);
+  const loadCoords = pointCoordinates(item.from);
+  const unloadCoords = pointCoordinates(item.to);
   const parsedPatch = {
     loadCity: cityName(item.from),
     unloadCity: cityName(item.to),
     loadCountry: countryName(item.from),
     unloadCountry: countryName(item.to),
+    loadLat: loadCoords?.lat ?? null,
+    loadLon: loadCoords?.lon ?? null,
+    unloadLat: unloadCoords?.lat ?? null,
+    unloadLon: unloadCoords?.lon ?? null,
     loadDate: isoDate(item.from?.date),
     truckType: truckTypeFrom(item),
     weightTons: Number.isFinite(weightTons) && weightTons > 0 ? weightTons : null,
