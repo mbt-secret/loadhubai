@@ -1,4 +1,5 @@
-DirectoryIndex index.html
+AddType application/manifest+json .webmanifest
+AddType application/javascript .js
 
 <IfModule mod_rewrite.c>
   RewriteEngine On

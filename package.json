@@ -1,0 +1,33 @@
+{
+  "name": "loadhubai-local-mvp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "MVP local pentru centralizarea curselor din grupuri WhatsApp.",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "start": "node src/server/index.mjs",
+    "server": "node src/server/index.mjs",
+    "import:places": "node scripts/import-geonames-cities.mjs",
+    "build": "vite build",
+    "preview": "node src/server/index.mjs",
+    "test": "node --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "lucide-react": "^0.468.0",
+    "playwright-core": "^1.57.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.0.4",
+    "typescript": "^5.9.3",
+    "vite": "^7.2.7"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}
