@@ -1,9 +1,11 @@
 import { spawn } from 'node:child_process';
+import { copyFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const viteBin = resolve(root, 'node_modules', 'vite', 'bin', 'vite.js');
+await copyFile(resolve(root, 'src/client/index.template.html'), resolve(root, 'index.html'));
 
 function startChild(label, command, args) {
   const child = spawn(command, args, {
