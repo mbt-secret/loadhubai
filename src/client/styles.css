@@ -959,14 +959,12 @@ button:disabled {
 
 .load-point-origin .load-code {
   color: #d5cbff;
-  background: rgba(124, 107, 255, 0.22);
-  border: 1px solid rgba(157, 139, 255, 0.24);
+  background: rgba(124, 107, 255, 0.16);
 }
 
 .load-point-destination .load-code {
   color: #82f7ba;
-  background: rgba(62, 217, 138, 0.18);
-  border: 1px solid rgba(62, 217, 138, 0.25);
+  background: rgba(62, 217, 138, 0.13);
 }
 
 .load-point-text {
