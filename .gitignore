@@ -4,3 +4,5 @@ data/
 screenshots/
 *.log
 *.zip
+.fuse_hidden*
+.codex-remote-attachments/
