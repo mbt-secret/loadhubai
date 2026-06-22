@@ -362,6 +362,18 @@ function compactLocation(city?: string | null, country?: string | null, fallback
   return cleanCountry || fallback;
 }
 
+function loadCardLocation(city?: string | null, country?: string | null, fallback = '') {
+  const cleanCountry = country?.trim();
+  const cleanCity = city
+    ?.trim()
+    .replace(/\s+/g, ' ')
+    .replace(/\s*\([^)]*\)/g, '')
+    .replace(/\s*,\s*[A-Z]{2}$/i, '')
+    .trim();
+
+  return cleanCity || cleanCountry || fallback;
+}
+
 function initialSearchDraft(): SearchDraft {
   try {
     const saved = localStorage.getItem('loadhub:user-location');
@@ -2554,16 +2566,16 @@ function formatTimeUntilLoad(
   const todayMidnight = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate());
   const dayDiff = Math.round((target.getTime() - todayMidnight.getTime()) / 86400000);
   if (dayDiff === 0) return { label: 'Astăzi', tone: 'today' };
+  if (dayDiff === 1) return { label: 'Mâine', tone: 'future' };
   if (dayDiff < 0) return { label: 'Expirat', tone: 'past' };
   const ms = Math.max(0, target.getTime() - now);
-  const totalMinutes = Math.floor(ms / 60000);
-  const days = Math.floor(totalMinutes / 1440);
-  const hours = Math.floor((totalMinutes % 1440) / 60);
-  const minutes = totalMinutes % 60;
+  const totalHours = Math.floor(ms / 3600000);
+  const days = Math.floor(totalHours / 24);
+  const hours = totalHours % 24;
   let label: string;
-  if (days > 0) label = `în ${days}z ${hours}h`;
-  else if (hours > 0) label = `în ${hours}h ${minutes}m`;
-  else label = `în ${minutes}m`;
+  if (days >= 2) label = `în ${days}z`;
+  else if (days > 0) label = hours > 0 ? `în ${days}z ${hours}h` : `în ${days}z`;
+  else label = `în ${Math.max(1, hours)}h`;
   return { label, tone: 'future' };
 }
 
@@ -2581,20 +2593,38 @@ function loadDayDiff(loadDate: string | null): number | null {
 function LoadCard({ load, onClick }: { load: Load; onClick: () => void }) {
   const now = useMinuteTick();
   const eta = formatTimeUntilLoad(load.loadDate, now);
-  const flag = countryCodeFromName(load.unloadCountry) || countryCodeFromName(load.loadCountry) || 'EU';
-  const meta = [load.weightTons ? `${load.weightTons}t` : null, load.truckType, formatDate(load.loadDate), load.groupName]
-    .filter(Boolean)
-    .join(' · ');
-  const showLang = Boolean(load.detectedLanguage && load.detectedLanguage !== 'ro');
+  const fromCode = countryCodeFromName(load.loadCountry) || 'DE';
+  const toCode = countryCodeFromName(load.unloadCountry) || 'SP';
+  const from = loadCardLocation(load.loadCity, load.loadCountry, 'Plecare');
+  const to = loadCardLocation(load.unloadCity, load.unloadCountry, 'Destinatie');
+  const hasPrice = hasIncludedPrice(load);
+  const metaItems = [load.weightTons ? `${load.weightTons}t` : null, load.truckType, formatDate(load.loadDate), load.groupName].filter(
+    (item): item is string => Boolean(item)
+  );
   return (
     <button className="load-card" onClick={onClick}>
-      <span className="load-flag">{flag}</span>
-      <span className="load-mid">
-        <span className="load-route">
-          {compactRoute(load)}
-          {showLang && <span className="load-tag">{load.detectedLanguage?.slice(0, 2).toUpperCase()} {'->'} RO</span>}
+      <span className="load-main">
+        <span className="load-route-stack">
+          <span className="load-point load-point-origin">
+            <span className="load-code">{fromCode}</span>
+            <span className="load-point-text">
+              <small>De la</small>
+              <strong>{from}</strong>
+            </span>
+          </span>
+          <span className="load-point load-point-destination">
+            <span className="load-code">{toCode}</span>
+            <span className="load-point-text">
+              <small>Spre</small>
+              <strong>{to}</strong>
+            </span>
+          </span>
         </span>
-        <span className="load-meta">{meta}</span>
+        <span className="load-meta">
+          {metaItems.map((item) => (
+            <span key={item}>{item}</span>
+          ))}
+        </span>
       </span>
       <span className="load-right">
         {eta && (
@@ -2602,7 +2632,7 @@ function LoadCard({ load, onClick }: { load: Load; onClick: () => void }) {
             <Clock size={12} /> {eta.label}
           </span>
         )}
-        <span className="load-amt">{load.price ?? 'n/a'}</span>
+        <span className={`load-amt ${hasPrice ? '' : 'empty'}`}>{hasPrice ? load.price : ''}</span>
         <span className="load-time">{formatTime(load.messageTime ?? load.capturedAt)}</span>
       </span>
     </button>
