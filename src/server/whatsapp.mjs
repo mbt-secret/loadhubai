@@ -1,50 +1,43 @@
 import { EventEmitter } from 'node:events';
-import { existsSync, mkdirSync } from 'node:fs';
+import { mkdirSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { defaultWhatsappProfileDir, nowIso } from './db.mjs';
 
-function findChromeExecutable() {
-  const candidates = [
-    process.env.CHROME_PATH,
-    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-    'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
-    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
-    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-    '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
-    '/usr/bin/google-chrome',
-    '/usr/bin/chromium',
-    '/usr/bin/chromium-browser',
-    '/usr/bin/microsoft-edge'
-  ].filter(Boolean);
+// Logger minimal, silentios, compatibil cu interfata asteptata de Baileys.
+const silentLogger = {
+  level: 'silent',
+  trace() {}, debug() {}, info() {}, warn() {}, error() {}, fatal() {},
+  child() { return silentLogger; }
+};
 
-  return candidates.find((candidate) => existsSync(candidate)) ?? undefined;
+function digitsOnly(value) {
+  return String(value ?? '').replace(/[^0-9]/g, '');
 }
 
-function shouldRunHeadless() {
-  const raw = process.env.WHATSAPP_HEADLESS;
-  if (raw != null) return !/^(0|false|no)$/i.test(raw.trim());
-  return process.env.NODE_ENV === 'production';
+function extractText(msg) {
+  const m = msg?.message;
+  if (!m) return '';
+  return (
+    m.conversation ??
+    m.extendedTextMessage?.text ??
+    m.imageMessage?.caption ??
+    m.videoMessage?.caption ??
+    m.documentMessage?.caption ??
+    m.buttonsResponseMessage?.selectedDisplayText ??
+    m.listResponseMessage?.title ??
+    m.templateButtonReplyMessage?.selectedDisplayText ??
+    ''
+  ) || '';
 }
 
-function parseWhatsappPrePlainText(value) {
-  const match = String(value ?? '').match(/^\[(.+?)\]\s*([^:]+)?:?\s*$/);
-  if (!match) return { messageTime: null, author: null };
-
-  const rawDate = match[1].trim();
-  const author = match[2]?.trim() || null;
-  const dateParts = rawDate.match(/(\d{1,2}):(\d{2}),\s*(\d{1,2})[./](\d{1,2})[./](\d{2,4})/);
-  if (!dateParts) return { messageTime: null, author };
-
-  const [, hour, minute, day, month, yearPart] = dateParts;
-  const year = Number(yearPart.length === 2 ? `20${yearPart}` : yearPart);
-  const date = new Date(year, Number(month) - 1, Number(day), Number(hour), Number(minute), 0, 0);
-  return {
-    messageTime: Number.isNaN(date.getTime()) ? null : date.toISOString(),
-    author
-  };
-}
-
+/**
+ * Adaptor WhatsApp READ-ONLY bazat pe Baileys (protocol oficial multi-device, fara browser/Chromium).
+ * Pastreaza aceeasi interfata publica precum vechiul adaptor Playwright:
+ *   getStatus(), connect({phoneNumber}), disconnect(), refreshGroups(), importGroupMessages()
+ *   + callback-urile onGroups(groups) / onMessage(message) si evenimentele 'status' / 'error'.
+ *
+ * Strict read-only: nu trimite mesaje, nu marcheaza citit, nu seteaza prezenta online.
+ */
 export class WhatsappAdapter extends EventEmitter {
   constructor({
     profileDir = defaultWhatsappProfileDir,
@@ -57,16 +50,21 @@ export class WhatsappAdapter extends EventEmitter {
     this.onGroups = onGroups;
     this.onMessage = onMessage;
     this.activeGroupsProvider = activeGroupsProvider;
-    this.context = null;
-    this.page = null;
-    this.monitorTimer = null;
-    this.qrTimer = null;
+    this.sock = null;
+    this.saveCreds = null;
+    this.starting = false;
+    this.shouldReconnect = true;
+    this.pendingPairingNumber = null;
+    this.pairingRequested = false;
+    this.reconnectAttempts = 0;
+    this.groupCache = new Map();
     this.status = {
       connected: false,
       state: 'disconnected',
       message: 'WhatsApp nu este conectat.',
       lastSyncAt: null,
-      qrCodeDataUrl: null
+      qrCodeDataUrl: null,
+      pairingCode: null
     };
   }
 
@@ -75,320 +73,259 @@ export class WhatsappAdapter extends EventEmitter {
   }
 
   setStatus(patch) {
-    const nextStatus = { ...this.status, ...patch };
-    if (patch.state && patch.state !== 'qr' && patch.qrCodeDataUrl === undefined) {
-      nextStatus.qrCodeDataUrl = null;
-    }
-    this.status = nextStatus;
+    this.status = { ...this.status, ...patch };
     this.emit('status', this.getStatus());
   }
 
-  async connect() {
-    if (this.context) return this.getStatus();
+  async connect({ phoneNumber } = {}) {
+    if (this.status.connected && this.sock) return this.getStatus();
+    if (phoneNumber) {
+      this.pendingPairingNumber = digitsOnly(phoneNumber);
+      this.pairingRequested = false;
+    }
+    this.shouldReconnect = true;
+    if (!this.starting) {
+      await this.startSocket();
+    }
+    return this.getStatus();
+  }
 
+  async loadBaileys() {
+    const mod = await import('@whiskeysockets/baileys');
+    const makeWASocket = mod.default ?? mod.makeWASocket;
+    const pick = (key) => mod[key] ?? mod.default?.[key];
+    return {
+      makeWASocket,
+      useMultiFileAuthState: pick('useMultiFileAuthState'),
+      DisconnectReason: pick('DisconnectReason') ?? {},
+      Browsers: pick('Browsers'),
+      fetchLatestBaileysVersion: pick('fetchLatestBaileysVersion')
+    };
+  }
+
+  async startSocket() {
+    this.starting = true;
     mkdirSync(this.profileDir, { recursive: true });
-    this.setStatus({
-      connected: false,
-      state: 'starting',
-      message: 'Se deschide WhatsApp Web...'
-    });
+    this.setStatus({ connected: false, state: 'starting', message: 'Se conecteaza la WhatsApp...', qrCodeDataUrl: null });
 
-    const executablePath = findChromeExecutable();
-    const { chromium } = await import('playwright-core');
-    const headless = shouldRunHeadless();
-
+    let lib;
     try {
-      this.context = await chromium.launchPersistentContext(this.profileDir, {
-        headless,
-        executablePath,
-        viewport: { width: 1280, height: 900 },
-        args: ['--disable-dev-shm-usage', '--no-first-run', '--no-sandbox', '--disable-setuid-sandbox']
-      });
+      lib = await this.loadBaileys();
     } catch (error) {
-      const message = String(error?.message ?? error);
-      this.context = null;
-      this.page = null;
-
-      if (/existing browser session|profile is already in use|user data directory is already in use/i.test(message)) {
-        this.setStatus({
-          connected: false,
-          state: 'error',
-          message:
-            'WhatsApp Web este deja deschis cu profilul local. Inchide fereastra Chrome WhatsApp ramasa deschisa, apoi apasa din nou Conecteaza WhatsApp.'
-        });
-        return this.getStatus();
-      }
-
-      if (/executable doesn't exist|playwright.*install|download new browsers/i.test(message)) {
-        this.setStatus({
-          connected: false,
-          state: 'error',
-          message:
-            'Chromium nu este instalat pe server. In cPanel ruleaza scriptul install:chromium din Run JS script, apoi reporneste aplicatia.'
-        });
-        return this.getStatus();
-      }
-
+      this.starting = false;
       this.setStatus({
         connected: false,
         state: 'error',
-        message: `WhatsApp Web nu a putut porni: ${message}`
+        message: 'Libraria WhatsApp (baileys) nu este instalata. Ruleaza npm install.'
       });
-      return this.getStatus();
+      return;
     }
 
-    this.page = this.context.pages()[0] ?? (await this.context.newPage());
-    this.page.on('close', () => {
-      this.context = null;
-      this.page = null;
-      this.stopQrMonitor();
-      this.stopMonitor();
-      this.setStatus({
-        connected: false,
-        state: 'disconnected',
-        message: 'Fereastra WhatsApp a fost inchisa.'
-      });
-    });
-
-    await this.page.goto('https://web.whatsapp.com', { waitUntil: 'domcontentloaded' });
-    this.setStatus({
-      connected: false,
-      state: 'qr',
-      message: headless
-        ? 'Scaneaza codul QR afisat aici cu WhatsApp de pe telefon.'
-        : 'Scaneaza codul QR in fereastra Chrome deschisa.'
-    });
-    await this.page
-      .waitForSelector('canvas, #pane-side, [aria-label*="Chat"], [aria-label*="chat"]', { timeout: 30000 })
-      .catch(() => {});
-    await this.updateQrCode().catch(() => {});
-    this.startQrMonitor();
-
-    this.waitForReady().catch((error) => {
-      this.stopQrMonitor();
-      this.setStatus({
-        connected: false,
-        state: 'error',
-        message: `WhatsApp Web nu a putut fi conectat: ${error.message}`
-      });
-    });
-
-    return this.getStatus();
-  }
-
-  async waitForReady() {
-    if (!this.page) return;
-    await this.page.waitForFunction(
-      () =>
-        Boolean(
-          document.querySelector('#pane-side') ||
-            document.querySelector('[aria-label*="Chat"]') ||
-            document.querySelector('[aria-label*="chat"]')
-        ),
-      null,
-      { timeout: 300000 }
-    );
-
-    this.stopQrMonitor();
-    this.setStatus({
-      connected: true,
-      state: 'connected',
-      message: 'WhatsApp Web este conectat.',
-      lastSyncAt: nowIso()
-    });
-    await this.refreshGroups();
-    this.startMonitor();
-  }
-
-  async disconnect() {
-    this.stopQrMonitor();
-    this.stopMonitor();
-    if (this.context) {
-      await this.context.close();
+    const { makeWASocket, useMultiFileAuthState, DisconnectReason, Browsers, fetchLatestBaileysVersion } = lib;
+    if (typeof makeWASocket !== 'function' || typeof useMultiFileAuthState !== 'function') {
+      this.starting = false;
+      this.setStatus({ connected: false, state: 'error', message: 'Versiune baileys incompatibila.' });
+      return;
     }
-    this.context = null;
-    this.page = null;
-    this.setStatus({
-      connected: false,
-      state: 'disconnected',
-      message: 'WhatsApp a fost deconectat.'
-    });
-    return this.getStatus();
-  }
 
-  async updateQrCode() {
-    if (!this.page || this.status.connected) return;
+    const { state, saveCreds } = await useMultiFileAuthState(this.profileDir);
+    this.saveCreds = saveCreds;
 
-    const ready = await this.page
-      .locator('#pane-side, [aria-label*="Chat"], [aria-label*="chat"]')
-      .first()
-      .count()
-      .catch(() => 0);
-    if (ready) return;
-
-    const canvas = this.page.locator('canvas').first();
-    const count = await canvas.count().catch(() => 0);
-    if (!count) return;
-
-    const png = await canvas.screenshot({ type: 'png' }).catch(() => null);
-    if (!png) return;
-
-    const qrCodeDataUrl = `data:image/png;base64,${png.toString('base64')}`;
-    if (qrCodeDataUrl && qrCodeDataUrl !== this.status.qrCodeDataUrl) {
-      this.setStatus({
-        connected: false,
-        state: 'qr',
-        message: 'Scaneaza codul QR afisat aici cu WhatsApp de pe telefon.',
-        qrCodeDataUrl
-      });
+    let version;
+    try {
+      if (fetchLatestBaileysVersion) ({ version } = await fetchLatestBaileysVersion());
+    } catch {
+      version = undefined;
     }
+
+    const browser = (Browsers && typeof Browsers.ubuntu === 'function')
+      ? Browsers.ubuntu('Chrome')
+      : ['Ubuntu', 'Chrome', '22.04.4'];
+
+    const sock = makeWASocket({
+      auth: state,
+      version,
+      logger: silentLogger,
+      browser,
+      markOnlineOnConnect: false,
+      syncFullHistory: false,
+      generateHighQualityLinkPreview: false,
+      shouldSyncHistoryMessage: () => false
+    });
+    this.sock = sock;
+    this.starting = false;
+
+    sock.ev.on('creds.update', saveCreds);
+
+    sock.ev.on('connection.update', async (update) => {
+      const { connection, lastDisconnect, qr } = update;
+
+      if (qr) {
+        if (this.pendingPairingNumber && !this.pairingRequested && !sock.authState?.creds?.registered) {
+          this.pairingRequested = true;
+          try {
+            const code = await sock.requestPairingCode(this.pendingPairingNumber);
+            const pretty = String(code).match(/.{1,4}/g)?.join('-') ?? code;
+            this.setStatus({
+              connected: false,
+              state: 'pairing',
+              message: 'Deschide WhatsApp pe telefon -> Setari -> Dispozitive conectate -> Conecteaza cu numarul de telefon, apoi introdu codul.',
+              pairingCode: pretty,
+              qrCodeDataUrl: null
+            });
+          } catch (error) {
+            this.setStatus({ connected: false, state: 'error', message: 'Nu am putut genera codul de asociere: ' + (error?.message ?? error) });
+          }
+        } else if (!this.pendingPairingNumber) {
+          try {
+            const QRCode = (await import('qrcode')).default;
+            const dataUrl = await QRCode.toDataURL(qr);
+            this.setStatus({
+              connected: false,
+              state: 'qr',
+              message: 'Scaneaza codul QR cu WhatsApp de pe alt dispozitiv (Dispozitive conectate -> Conecteaza un dispozitiv).',
+              qrCodeDataUrl: dataUrl,
+              pairingCode: null
+            });
+          } catch {
+            // pachetul qrcode lipseste; ignoram
+          }
+        }
+        return;
+      }
+
+      if (connection === 'open') {
+        this.reconnectAttempts = 0;
+        this.pendingPairingNumber = null;
+        this.pairingRequested = false;
+        this.setStatus({
+          connected: true,
+          state: 'connected',
+          message: 'WhatsApp este conectat.',
+          lastSyncAt: nowIso(),
+          qrCodeDataUrl: null,
+          pairingCode: null
+        });
+        this.refreshGroups().catch((error) => this.emit('error', error));
+        return;
+      }
+
+      if (connection === 'close') {
+        const statusCode = lastDisconnect?.error?.output?.statusCode;
+        const loggedOut = DisconnectReason && statusCode === DisconnectReason.loggedOut;
+        this.sock = null;
+
+        if (loggedOut) {
+          this.shouldReconnect = false;
+          try { rmSync(this.profileDir, { recursive: true, force: true }); } catch {}
+          this.setStatus({
+            connected: false,
+            state: 'disconnected',
+            message: 'WhatsApp a fost deconectat (delogat). Conecteaza din nou.',
+            qrCodeDataUrl: null,
+            pairingCode: null
+          });
+          return;
+        }
+
+        if (this.shouldReconnect) {
+          this.reconnectAttempts += 1;
+          const delay = Math.min(30000, 2000 * this.reconnectAttempts);
+          this.setStatus({ connected: false, state: 'starting', message: 'Reconectare la WhatsApp...' });
+          setTimeout(() => {
+            if (this.shouldReconnect && !this.starting) {
+              this.startSocket().catch((error) => this.emit('error', error));
+            }
+          }, delay);
+        }
+      }
+    });
+
+    sock.ev.on('messages.upsert', async (payload) => {
+      if (payload?.type !== 'notify') return;
+      const messages = payload.messages ?? [];
+      const activeIds = new Set(this.activeGroupsProvider().map((group) => String(group.whatsappId ?? '')));
+      if (activeIds.size === 0) return; // niciun grup activ -> nu ingeram nimic
+
+      for (const msg of messages) {
+        try {
+          const jid = msg?.key?.remoteJid ?? '';
+          if (!jid.endsWith('@g.us')) continue;       // doar grupuri
+          if (msg?.key?.fromMe) continue;
+          if (!activeIds.has(jid)) continue;           // doar grupuri active
+          const text = extractText(msg).trim();
+          if (!text) continue;
+
+          const groupName = (await this.getGroupSubject(jid)) ?? jid;
+          const ts = Number(msg.messageTimestamp ?? 0);
+
+          await this.onMessage({
+            groupName,
+            groupWhatsappId: jid,
+            whatsappMessageId: msg?.key?.id ?? null,
+            author: msg?.pushName ?? msg?.key?.participant ?? null,
+            messageTime: ts ? new Date(ts * 1000).toISOString() : null,
+            capturedAt: nowIso(),
+            text
+          });
+        } catch (error) {
+          this.emit('error', error);
+        }
+      }
+    });
   }
 
-  startQrMonitor() {
-    this.stopQrMonitor();
-    this.qrTimer = setInterval(() => {
-      this.updateQrCode().catch((error) => this.emit('error', error));
-    }, 3000);
-  }
-
-  stopQrMonitor() {
-    if (this.qrTimer) clearInterval(this.qrTimer);
-    this.qrTimer = null;
+  async getGroupSubject(jid) {
+    if (this.groupCache.has(jid)) return this.groupCache.get(jid);
+    if (!this.sock) return null;
+    try {
+      const meta = await this.sock.groupMetadata(jid);
+      const subject = meta?.subject ?? null;
+      if (subject) this.groupCache.set(jid, subject);
+      return subject;
+    } catch {
+      return null;
+    }
   }
 
   async refreshGroups() {
-    if (!this.page) return [];
-
-    const ready = await this.page
-      .locator('#pane-side, [aria-label*="Chat"], [aria-label*="chat"]')
-      .first()
-      .count()
-      .catch(() => 0);
-    if (!ready) return [];
-
-    if (!this.status.connected) {
-      this.setStatus({
-        connected: true,
-        state: 'connected',
-        message: 'WhatsApp Web este conectat.',
-        lastSyncAt: nowIso()
+    if (!this.sock || !this.status.connected) return [];
+    let groups = [];
+    try {
+      const all = await this.sock.groupFetchAllParticipating();
+      groups = Object.values(all ?? {}).map((g) => {
+        if (g?.id && g?.subject) this.groupCache.set(g.id, g.subject);
+        return { name: g?.subject ?? g?.id, whatsappId: g?.id };
       });
+    } catch (error) {
+      this.emit('error', error);
+      return [];
     }
-
-    const groupFilter = this.page
-      .locator('button, div[role="button"]')
-      .filter({ hasText: /^(Groups|Grupuri|Grupos|Gruppen|Groupes|Gruppi|Gruplar|Группы)$/i })
-      .first();
-    if ((await groupFilter.count().catch(() => 0)) > 0) {
-      await groupFilter.click({ timeout: 1500 }).catch(() => {});
-      await this.page.waitForTimeout(400);
-    }
-
-    const groups = await this.page.evaluate(() => {
-      const sidebar =
-        document.querySelector('#pane-side') ??
-        document.querySelector('[aria-label*="Chat"]') ??
-        document.querySelector('[aria-label*="chat"]') ??
-        document;
-      const ignored = /^(online|typing|search|cauta|arhivat|archived|toate|all|necitite|unread|favorite|favourites|groups|grupuri)$/i;
-      const names = [];
-
-      const add = (value) => {
-        const rawName = String(value ?? '');
-        if (/[\r\n\u202A-\u202E]/.test(rawName)) return;
-        const name = rawName.replace(/\s+/g, ' ').trim();
-        if (!name) return;
-        if (name.length < 2 || name.length > 120) return;
-        if (/^\d{1,2}:\d{2}$/.test(name)) return;
-        if (/^\+?[\d\s().-]{7,}$/.test(name)) return;
-        if (/^\d+\s*(mesaje?|messages?)$/i.test(name)) return;
-        if (ignored.test(name)) return;
-        // Captureaza TOATE grupurile (fara filtru de cuvinte-cheie).
-        names.push(name);
-      };
-
-      const rows = Array.from(sidebar.querySelectorAll('[role="row"], [role="listitem"], [data-testid="cell-frame-container"]'));
-      if (rows.length > 0) {
-        for (const row of rows) {
-          add(row.querySelector('span[title]')?.getAttribute('title'));
-        }
-      } else {
-        for (const node of sidebar.querySelectorAll('span[title]')) {
-          add(node.getAttribute('title'));
-        }
-      }
-
-      return Array.from(new Set(names)).map((name) => ({ name, whatsappId: name }));
-    });
-    console.log(`[whatsapp] refreshGroups: ${groups.length} grup(uri) gasite in WhatsApp Web.`);
     this.onGroups(groups);
     this.setStatus({ lastSyncAt: nowIso() });
     return groups;
   }
 
-  async importGroupMessages(group, { maxMessages = 40 } = {}) {
-    if (!this.page || !this.status.connected) return [];
-
-    const target = this.page.locator('span[title]').filter({ hasText: group.name }).first();
-    await target.click({ timeout: 7000 });
-    await this.page.waitForTimeout(900);
-
-    const rows = await this.page.evaluate((limit) => {
-      const nodes = Array.from(document.querySelectorAll('[data-pre-plain-text]')).slice(-limit);
-      return nodes
-        .map((node) => {
-          const rawMeta = node.getAttribute('data-pre-plain-text') ?? '';
-          const text = (node.innerText ?? '')
-            .split('\n')
-            .filter((line) => !/^\d{1,2}:\d{2}$/.test(line.trim()))
-            .join('\n')
-            .trim();
-          const id =
-            node.closest('[data-id]')?.getAttribute('data-id') ??
-            node.closest('[id]')?.getAttribute('id') ??
-            null;
-          return { rawMeta, text, whatsappMessageId: id };
-        })
-        .filter((row) => row.text.length > 0);
-    }, maxMessages);
-
-    const imported = [];
-    for (const row of rows) {
-      const meta = parseWhatsappPrePlainText(row.rawMeta);
-      const message = {
-        groupName: group.name,
-        groupWhatsappId: group.whatsappId ?? group.name,
-        whatsappMessageId: row.whatsappMessageId,
-        author: meta.author,
-        messageTime: meta.messageTime,
-        capturedAt: nowIso(),
-        text: row.text
-      };
-      imported.push(message);
-      await this.onMessage(message);
-    }
-
-    this.setStatus({ lastSyncAt: nowIso() });
-    return imported;
+  // Read-only, event-driven: mesajele noi vin live prin messages.upsert.
+  // Nu tragem istoric (amprenta minima, cel mai putin bot-like).
+  async importGroupMessages() {
+    return [];
   }
 
-  startMonitor() {
-    this.stopMonitor();
-    this.monitorTimer = setInterval(async () => {
-      try {
-        const activeGroups = this.activeGroupsProvider();
-        for (const group of activeGroups) {
-          await this.importGroupMessages(group, { maxMessages: 20 });
-        }
-        await this.refreshGroups();
-      } catch (error) {
-        this.emit('error', error);
-      }
-    }, 30000);
-  }
-
-  stopMonitor() {
-    if (this.monitorTimer) clearInterval(this.monitorTimer);
-    this.monitorTimer = null;
+  async disconnect() {
+    this.shouldReconnect = false;
+    const sock = this.sock;
+    this.sock = null;
+    try { if (sock) await sock.logout(); } catch {}
+    try { if (sock) sock.end?.(undefined); } catch {}
+    try { rmSync(this.profileDir, { recursive: true, force: true }); } catch {}
+    this.setStatus({
+      connected: false,
+      state: 'disconnected',
+      message: 'WhatsApp a fost deconectat.',
+      qrCodeDataUrl: null,
+      pairingCode: null
+    });
+    return this.getStatus();
   }
 }

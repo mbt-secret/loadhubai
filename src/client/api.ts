@@ -38,7 +38,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   status: () => request<WhatsappStatus>('/api/whatsapp/status'),
-  connectWhatsapp: () => request<WhatsappStatus>('/api/whatsapp/connect', { method: 'POST' }),
+  connectWhatsapp: (phoneNumber?: string) =>
+    request<WhatsappStatus>('/api/whatsapp/connect', {
+      method: 'POST',
+      body: JSON.stringify({ phoneNumber: phoneNumber ?? null })
+    }),
   disconnectWhatsapp: () => request<WhatsappStatus>('/api/whatsapp/disconnect', { method: 'POST' }),
   groups: () => request<Group[]>('/api/groups'),
   refreshGroups: () => request<Group[]>('/api/groups/refresh', { method: 'POST' }),

@@ -2864,9 +2864,28 @@ button:disabled {
   color: var(--green);
 }
 
-.saved-actions button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
+/* WhatsApp connect (pairing code) */
+.text-input {
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.06);
+  color: inherit;
+  font-size: 16px;
+  margin-bottom: 12px;
+  box-sizing: border-box;
+}
+.text-input::placeholder { color: rgba(255, 255, 255, 0.4); }
+.pairing-code {
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: 4px;
+  text-align: center;
+  padding: 16px;
+  margin: 8px 0 12px;
+  border-radius: 12px;
+  background: rgba(124, 92, 255, 0.15);
+  color: #fff;
+  user-select: all;
 }

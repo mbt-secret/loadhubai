@@ -1,9 +1,10 @@
 export type WhatsappStatus = {
   connected: boolean;
-  state: 'disconnected' | 'starting' | 'qr' | 'connected' | 'error';
+  state: 'disconnected' | 'starting' | 'qr' | 'pairing' | 'connected' | 'error';
   message: string;
   lastSyncAt?: string | null;
   qrCodeDataUrl?: string | null;
+  pairingCode?: string | null;
 };
 
 export type Group = {

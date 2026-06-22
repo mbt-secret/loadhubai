@@ -282,7 +282,7 @@ app.get('/api/whatsapp/status', (req, res) => {
 
 app.post('/api/whatsapp/connect', async (req, res, next) => {
   try {
-    res.json(await whatsapp.connect());
+    res.json(await whatsapp.connect({ phoneNumber: req.body?.phoneNumber }));
   } catch (error) {
     next(error);
   }

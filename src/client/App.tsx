@@ -667,11 +667,11 @@ function App() {
     });
   }
 
-  async function connectWhatsapp(nextView: View = 'connect') {
+  async function connectWhatsapp(nextView: View = 'connect', phoneNumber?: string) {
     setConnectingWhatsapp(true);
     try {
       await run(async () => {
-        const nextStatus = await api.connectWhatsapp();
+        const nextStatus = await api.connectWhatsapp(phoneNumber);
         setStatus(nextStatus);
         if (nextStatus.connected) {
           setGroups(await api.refreshGroups());
@@ -799,7 +799,7 @@ function App() {
             <ConnectScreen
               status={status}
               loading={loading}
-              onConnect={() => connectWhatsapp('connect')}
+              onConnect={(phone) => connectWhatsapp('connect', phone)}
               onDisconnect={disconnectWhatsapp}
             />
           )}
@@ -958,7 +958,7 @@ function App() {
               settings={settings}
               groups={groups}
               savedSearches={savedSearches}
-              onConnect={() => connectWhatsapp('settings')}
+              onConnect={() => setView('connect')}
               onDisconnect={disconnectWhatsapp}
               loading={loading}
               connectingWhatsapp={connectingWhatsapp}
@@ -1163,32 +1163,58 @@ function ConnectScreen({
 }: {
   status: WhatsappStatus;
   loading: boolean;
-  onConnect: () => void;
+  onConnect: (phone?: string) => void;
   onDisconnect: () => void;
 }) {
+  const [phone, setPhone] = useState('');
+  const showPairing = status.state === 'pairing' && !!status.pairingCode;
+  const digits = phone.replace(/\D/g, '');
   return (
     <section className="screen-stack">
-      <ScreenHeader title="Conectează WhatsApp" subtitle="Scaneaza codul QR si lasa aplicatia sa citeasca grupurile active." />
+      <ScreenHeader title="Conecteaza WhatsApp" subtitle="Foloseste un numar dedicat. Doar citire - aplicatia nu trimite niciodata mesaje." />
       <div className="qr-card">
-        {status.qrCodeDataUrl ? (
-          <img className="qr-image" src={status.qrCodeDataUrl} alt="Cod QR WhatsApp" />
+        {status.connected ? (
+          <>
+            <p className="help-text">{status.message}</p>
+            <button className="success-button wide" onClick={onDisconnect} disabled={loading}>
+              <Check size={18} /> Deconecteaza
+            </button>
+          </>
+        ) : showPairing ? (
+          <>
+            <p className="help-text">Cod de asociere (introdu-l in WhatsApp):</p>
+            <div className="pairing-code">{status.pairingCode}</div>
+            <p className="help-text">{status.message}</p>
+          </>
+        ) : status.qrCodeDataUrl ? (
+          <>
+            <img className="qr-image" src={status.qrCodeDataUrl} alt="Cod QR WhatsApp" />
+            <p className="help-text">{status.message}</p>
+          </>
         ) : (
-          <div className="qr-mock" aria-label="QR WhatsApp">
-            {Array.from({ length: 49 }).map((_, index) => (
-              <span key={index} className={(index * 7 + index) % 5 < 2 ? 'dark' : ''} />
-            ))}
-          </div>
+          <>
+            <input
+              className="text-input wide"
+              type="tel"
+              inputMode="numeric"
+              placeholder="Numar cu prefix de tara, ex: 373XXXXXXXX"
+              value={phone}
+              onChange={(event) => setPhone(event.target.value)}
+            />
+            <button
+              className="primary-button wide"
+              onClick={() => onConnect(digits)}
+              disabled={loading || digits.length < 8}
+            >
+              <MessageCircle size={18} /> Obtine cod de asociere
+            </button>
+            <p className="help-text">{status.message}</p>
+          </>
         )}
-        <button className={status.connected ? 'success-button wide' : 'primary-button wide'} onClick={status.connected ? onDisconnect : onConnect} disabled={loading}>
-          {status.connected ? <Check size={18} /> : <MessageCircle size={18} />}
-          {status.connected ? 'Conectat' : 'Conectează WhatsApp'}
-        </button>
-        <p className="help-text">{status.message}</p>
       </div>
     </section>
   );
 }
-
 function GroupsScreen({
   groups,
   activeGroups,
