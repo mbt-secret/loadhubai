@@ -1028,12 +1028,19 @@ button:disabled {
   padding-top: 2px;
 }
 
-.price,
-.load-amt {
+.price {
   font-size: 1rem;
   font-weight: 700;
   color: var(--green);
   letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+
+.load-amt {
+  font-size: 0.84rem;
+  font-weight: 700;
+  color: rgba(62, 217, 138, 0.88);
+  letter-spacing: 0;
   white-space: nowrap;
 }
 
@@ -1042,7 +1049,7 @@ button:disabled {
 }
 
 .load-time {
-  font-size: 0.7rem;
+  font-size: 0.66rem;
   color: var(--dim);
   margin-top: 3px;
 }
@@ -3132,14 +3139,15 @@ button:disabled {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-size: 12px;
+  font-size: 0.68rem;
   font-weight: 700;
-  padding: 3px 9px;
+  padding: 2px 8px;
   margin-bottom: 4px;
   border-radius: 999px;
   white-space: nowrap;
-  letter-spacing: 0.2px;
+  letter-spacing: 0;
 }
+.load-eta svg { width: 11px; height: 11px; }
 .load-eta-today { background: rgba(54, 215, 127, 0.22); color: #36d77f; }
 .load-eta-future { background: rgba(124, 92, 255, 0.22); color: #c2b4ff; }
 .load-eta-past { background: rgba(255, 99, 99, 0.20); color: #ff8a8a; }
@@ -3157,6 +3165,26 @@ button:disabled {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+.feed-filter-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.feed-filter-head > span {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: #fff;
+}
+.feed-filter-head button {
+  border: 1px solid rgba(157, 139, 255, 0.2);
+  background: rgba(124, 107, 255, 0.12);
+  color: var(--violet-soft);
+  border-radius: 999px;
+  padding: 5px 10px;
+  font-size: 0.76rem;
+  font-weight: 700;
 }
 .filter-group { display: flex; flex-direction: column; gap: 6px; }
 .filter-label { font-size: 12px; color: rgba(255, 255, 255, 0.55); font-weight: 600; }
