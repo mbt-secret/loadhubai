@@ -126,8 +126,8 @@ function rememberInstallPromptDismissed() {
 const defaultSearchDraft: SearchDraft = {
   origin: 'Arad, Romania',
   originSource: 'gps',
-  destination: 'Germania',
-  destinationType: 'country',
+  destination: 'Toate locatiile',
+  destinationType: 'all',
   radiusKm: 200,
   radiusMode: 'radius',
   truckType: 'Orice',
@@ -137,6 +137,15 @@ const defaultSearchDraft: SearchDraft = {
   loadDate: 'Oricand',
   messageAge: 'Oricand'
 };
+
+function countActiveSearchFilters(draft: SearchDraft) {
+  return [
+    draft.truckType !== defaultSearchDraft.truckType,
+    draft.loadDate !== defaultSearchDraft.loadDate,
+    draft.messageAge !== defaultSearchDraft.messageAge,
+    draft.radiusKm !== defaultSearchDraft.radiusKm
+  ].filter(Boolean).length;
+}
 
 const radiusOptions = [50, 100, 150, 200, 300];
 
@@ -256,7 +265,70 @@ function originSubtitle(draft: SearchDraft) {
 }
 
 function destinationLabel(draft: SearchDraft) {
-  return draft.destinationType === 'all' ? 'Toate destinatiile' : draft.destination;
+  return draft.destinationType === 'all' ? 'Toate locatiile' : draft.destination;
+}
+
+function cleanRouteEndpoint(value: string | null | undefined, fallback: string) {
+  const cleaned = String(value || '')
+    .replace(/\s+/g, ' ')
+    .replace(/^[,.\->\s]+|[,.\->\s]+$/g, '')
+    .replace(/^(tara|țara|orasul|orașul|oras|oraș)\s+/i, '')
+    .trim();
+  const normalized = normalizeCountryName(cleaned);
+  if (!cleaned || ['toate', 'toate locatiile', 'toate destinatiile'].includes(normalized)) return fallback;
+  return cleaned.charAt(0).toLocaleUpperCase('ro-RO') + cleaned.slice(1);
+}
+
+function escapeRegex(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function extractRoutePartFromQuery(query: string, markers: string[], stops: string[]) {
+  const trimmed = query.trim();
+  if (!trimmed) return null;
+  const markerPattern = markers.map(escapeRegex).join('|');
+  const markerMatch = new RegExp(`(?:^|\\s)(?:${markerPattern})\\s+(.+)$`, 'i').exec(trimmed);
+  if (!markerMatch) return null;
+
+  let segment = markerMatch[1];
+  const stopPattern = stops.map(escapeRegex).join('|');
+  const stopMatch = new RegExp(`\\s+(?:${stopPattern})(?:\\s+|$)`, 'i').exec(segment);
+  if (stopMatch) segment = segment.slice(0, stopMatch.index);
+  return cleanRouteEndpoint(segment, '');
+}
+
+function resultsRouteSummary(query: string, draft: SearchDraft) {
+  const routeStops = [
+    'catre',
+    'către',
+    'spre',
+    'pana la',
+    'până la',
+    'cu',
+    'prelata',
+    'prelată',
+    'frigo',
+    'mega',
+    'duba',
+    'dubă',
+    'basculanta',
+    'basculantă',
+    'azi',
+    'maine',
+    'mâine',
+    'oricand',
+    'oricând'
+  ];
+  const startFromQuery = extractRoutePartFromQuery(query, ['din', 'de la'], routeStops);
+  const finishFromQuery = extractRoutePartFromQuery(
+    query,
+    ['catre', 'către', 'spre', 'pana la', 'până la'],
+    routeStops.filter((item) => !['catre', 'către', 'spre', 'pana la', 'până la'].includes(item))
+  );
+  const start = startFromQuery || cleanRouteEndpoint(draft.origin, 'Start');
+  const finish =
+    finishFromQuery || (draft.destinationType === 'all' ? 'Oriunde' : cleanRouteEndpoint(destinationLabel(draft), 'Oriunde'));
+  return { start, finish, startFromQuery: Boolean(startFromQuery), finishFromQuery: Boolean(finishFromQuery) };
 }
 
 function destinationOptionLabel(option: DestinationOption) {
@@ -377,6 +449,66 @@ function priceValue(load: Load): number | null {
   if (!load.price) return null;
   const digits = load.price.replace(/[^\d]/g, '');
   return digits ? Number(digits) : null;
+}
+
+const messageAgeWindowsMs = new Map<NonNullable<LoadSearchParams['messageAge']>, number>([
+  ['10m', 10 * 60 * 1000],
+  ['1h', 60 * 60 * 1000],
+  ['5h', 5 * 60 * 60 * 1000],
+  ['1d', 24 * 60 * 60 * 1000]
+]);
+
+function localDateIso(offsetDays = 0) {
+  const date = new Date();
+  date.setHours(0, 0, 0, 0);
+  date.setDate(date.getDate() + offsetDays);
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+function draftLoadDateIso(value: string) {
+  if (value === 'Azi') return localDateIso();
+  if (value === 'Maine') return localDateIso(1);
+  const match = value.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
+  if (!match) return null;
+  return `${match[3]}-${match[2].padStart(2, '0')}-${match[1].padStart(2, '0')}`;
+}
+
+function loadMatchesResultFilters(load: Load, draft: SearchDraft) {
+  if (draft.truckType !== defaultSearchDraft.truckType) {
+    const loadTruck = normalizeCountryName(load.truckType);
+    const selectedTruck = normalizeCountryName(draft.truckType);
+    if (!loadTruck || !loadTruck.includes(selectedTruck.slice(0, 4))) return false;
+  }
+
+  if (draft.loadDate !== defaultSearchDraft.loadDate) {
+    const expectedDate = draftLoadDateIso(draft.loadDate);
+    if (!expectedDate || !load.loadDate?.startsWith(expectedDate)) return false;
+  }
+
+  if (draft.messageAge !== defaultSearchDraft.messageAge) {
+    const ageCode = messageAgeCode(draft.messageAge);
+    const windowMs = ageCode ? messageAgeWindowsMs.get(ageCode) : null;
+    const capturedAtMs = new Date(load.capturedAt).getTime();
+    if (!windowMs || !Number.isFinite(capturedAtMs) || capturedAtMs < Date.now() - windowMs) return false;
+  }
+
+  if (draft.radiusKm !== defaultSearchDraft.radiusKm && draft.radiusMode === 'radius') {
+    const origin = originCoords(draft);
+    if (origin) {
+      const lat = Number(load.loadLat);
+      const lng = Number(load.loadLon);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng) || distanceKm(origin, { lat, lng }) > draft.radiusKm) return false;
+    }
+  }
+
+  return true;
+}
+
+function filterLoadsForResults(loads: Load[], draft: SearchDraft) {
+  if (countActiveSearchFilters(draft) === 0) return loads;
+  return loads.filter((load) => loadMatchesResultFilters(load, draft));
 }
 
 function formatDate(value?: string | null) {
@@ -509,16 +641,19 @@ function App() {
   const [groups, setGroups] = useState<Group[]>([]);
   const [loads, setLoads] = useState<Load[]>([]);
   const [feedLoads, setFeedLoads] = useState<Load[]>([]);
+  const [feedLoading, setFeedLoading] = useState(true);
   const [selectedLoad, setSelectedLoad] = useState<Load | null>(null);
   const [savedSearches, setSavedSearches] = useState<SavedSearch[]>([]);
   const [savedOffers, setSavedOffers] = useState<Load[]>(() => readSavedOffers());
   const [settings, setSettings] = useState<LocalSettings>(defaultSettings);
-  const [query, setQuery] = useState('');
-  const [searchDraft, setSearchDraft] = useState<SearchDraft>(initialSearchDraft);
+  const [query, setQuery] = usePersistentState('loadhub.search.query', '', 7200000);
+  const [searchDraft, setSearchDraft] = usePersistentState<SearchDraft>('loadhub.search.draft', initialSearchDraft(), 7200000);
+  const [hasActiveSearch, setHasActiveSearch] = usePersistentState('loadhub.search.active', false, 7200000);
   const [priceOnlyResults, setPriceOnlyResults] = useState(false);
   const [groupFilter, setGroupFilter] = useState('');
   const [loading, setLoading] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
+  const [filterSheetContext, setFilterSheetContext] = useState<'search' | 'results'>('search');
   const [alertEditor, setAlertEditor] = useState<{ id: number; draft: SearchDraft } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notifications, setNotifications] = useState<Load[]>([]);
@@ -568,7 +703,20 @@ function App() {
   }
 
   useEffect(() => {
-    refreshAll('').catch((currentError) => setError(currentError.message));
+    const started = Date.now();
+    refreshAll('')
+      .catch((currentError) => setError(currentError.message))
+      .finally(() => {
+        const wait = Math.max(0, 1300 - (Date.now() - started));
+        window.setTimeout(() => setFeedLoading(false), wait);
+      });
+  }, []);
+
+  useEffect(() => {
+    if (hasActiveSearch && query.trim()) {
+      api.loads(query).then(setLoads).catch(() => undefined);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -641,12 +789,32 @@ function App() {
     });
   }
 
+  function startNewSearch() {
+    setHasActiveSearch(false);
+    setQuery('');
+    setSearchDraft(initialSearchDraft());
+    setView('search');
+  }
+
+  function editCurrentSearch() {
+    const route = resultsRouteSummary(query, searchDraft);
+    setSearchDraft((current) => ({
+      ...current,
+      origin: route.start === 'Start' ? current.origin : route.start,
+      originSource: route.startFromQuery || route.start !== current.origin ? 'manual' : current.originSource,
+      destination: route.finish === 'Oriunde' ? defaultSearchDraft.destination : route.finish,
+      destinationType: route.finish === 'Oriunde' ? 'all' : 'country'
+    }));
+    setView('search');
+  }
+
   async function performSearch(nextQuery = query) {
     await run(async () => {
       const nextLoads = await api.loads(nextQuery);
       setLoads(nextLoads);
       setQuery(nextQuery);
       setPriceOnlyResults(false);
+      setHasActiveSearch(true);
       setView('results');
     });
   }
@@ -694,6 +862,7 @@ function App() {
       setView('searching');
       await new Promise((resolve) => setTimeout(resolve, 1100));
       setLoads(await api.loads(smartQuery, smartFilters));
+      setHasActiveSearch(true);
       setView('results');
     });
   }
@@ -883,6 +1052,7 @@ function App() {
           {view === 'home' && (
             <HomeScreen
               loads={feedLoads}
+              feedLoading={feedLoading}
               status={status}
               groups={groups}
               savedSearches={savedSearches}
@@ -925,7 +1095,10 @@ function App() {
               openRadius={() => setView('radius')}
               openConfirm={() => setView('confirm')}
               onRun={runGuidedSearch}
-              openFilters={() => setFiltersOpen(true)}
+              openFilters={() => {
+                setFilterSheetContext('search');
+                setFiltersOpen(true);
+              }}
             />
           )}
           {view === 'origin' && (
@@ -977,15 +1150,28 @@ function App() {
               loads={loads}
               priceOnly={priceOnlyResults}
               setPriceOnly={setPriceOnlyResults}
-              performSearch={performSearch}
               openLoad={openLoad}
-              setQuery={setQuery}
               goMap={() => setView('map')}
               savedSearches={savedSearches}
               onToggleAlert={toggleAlert}
+              onNewSearch={startNewSearch}
+              onEditSearch={editCurrentSearch}
+              resultFilters={searchDraft}
+              openFilters={() => {
+                setFilterSheetContext('results');
+                setFiltersOpen(true);
+              }}
             />
           )}
-          {view === 'map' && <MapScreen openLoad={openLoad} goList={() => setView('results')} />}
+          {view === 'map' && (
+            <MapScreen
+              openLoad={openLoad}
+              goList={() => setView('results')}
+              hasActiveSearch={hasActiveSearch}
+              searchLoads={loads}
+              onNewSearch={startNewSearch}
+            />
+          )}
           {view === 'detail' && selectedLoad && (
             <DetailScreen
               load={selectedLoad}
@@ -1088,17 +1274,21 @@ function App() {
             />
           )}
         </main>
-        <BottomNav view={view} setView={setView} selectedLoad={selectedLoad} notificationCount={notifications.length} />
+        <BottomNav view={view} setView={setView} selectedLoad={selectedLoad} notificationCount={notifications.length} onSearchTab={() => setView(hasActiveSearch ? 'results' : 'search')} />
         <FilterSheet
           open={filtersOpen}
           onClose={() => setFiltersOpen(false)}
-          onPrimary={() => {
-            setFiltersOpen(false);
-            runGuidedSearch();
-          }}
-          primaryLabel="Caută"
-          primaryIcon={<Search size={18} />}
-          title="Filtre"
+          onPrimary={
+            filterSheetContext === 'search'
+              ? () => {
+                  setFiltersOpen(false);
+                  runGuidedSearch();
+                }
+              : undefined
+          }
+          primaryLabel={filterSheetContext === 'search' ? 'Caută' : undefined}
+          primaryIcon={filterSheetContext === 'search' ? <Search size={18} /> : undefined}
+          title={filterSheetContext === 'results' ? 'Filtre rezultate' : 'Filtre'}
           draft={searchDraft}
           setDraft={setSearchDraft}
         />
@@ -1149,8 +1339,32 @@ function PhoneStatus() {
   );
 }
 
+function FeedLoader() {
+  const messages = [
+    'Pornim camioanele...',
+    'Strangem cursele de pe toate drumurile...',
+    'Negociem cu soferii la o cafea...',
+    'Verificam cine mai are marfa de dus...',
+    'Incalzim motoarele si AI-ul...'
+  ];
+  const [i, setI] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setI((v) => (v + 1) % messages.length), 1300);
+    return () => clearInterval(id);
+  }, []);
+  return (
+    <div className="feed-loader">
+      <div className="loader-road">
+        <span className="loader-truck">🚛</span>
+      </div>
+      <p className="loader-msg">{messages[i]}</p>
+    </div>
+  );
+}
+
 function HomeScreen({
   loads,
+  feedLoading,
   status,
   groups,
   savedSearches,
@@ -1160,6 +1374,7 @@ function HomeScreen({
   onAlerts
 }: {
   loads: Load[];
+  feedLoading: boolean;
   status: WhatsappStatus;
   groups: Group[];
   savedSearches: SavedSearch[];
@@ -1168,9 +1383,9 @@ function HomeScreen({
   onSearch: () => void;
   onAlerts: () => void;
 }) {
-  const [chip, setChip] = usePersistentState<'Toate' | 'Cu pret'>('loadhub.feed.chip', 'Toate');
+  const [priceOnly, setPriceOnly] = usePersistentState('loadhub.feed.priceOnly', false);
+  const [sortPrice, setSortPrice] = usePersistentState<'none' | 'asc' | 'desc'>('loadhub.feed.sortPrice', 'none');
   const [showFilters, setShowFilters] = useState(false);
-  const [intl, setIntl] = usePersistentState('loadhub.feed.intl', false);
   const [truck, setTruck] = usePersistentState('loadhub.feed.truck', 'Orice');
   const [depart, setDepart] = usePersistentState<'Oricand' | 'Astazi' | 'Maine' | '3 zile'>('loadhub.feed.depart', 'Oricand');
   const activeGroups = groups.filter((group) => group.isActive).length;
@@ -1180,9 +1395,7 @@ function HomeScreen({
     const timeB = new Date(b.messageTime ?? b.capturedAt).getTime() || 0;
     return timeB - timeA;
   });
-  const filtered = chip === 'Cu pret' ? sorted.filter(hasIncludedPrice) : sorted;
-  const recent = filtered.filter((load) => {
-    if (intl && !(load.loadCountry && load.unloadCountry && load.loadCountry !== load.unloadCountry)) return false;
+  const feedFiltered = sorted.filter((load) => {
     if (truck !== 'Orice' && !(load.truckType ?? '').toLowerCase().includes(truck.toLowerCase().slice(0, 4))) return false;
     if (depart !== 'Oricand') {
       const d = loadDayDiff(load.loadDate);
@@ -1192,7 +1405,27 @@ function HomeScreen({
     }
     return true;
   });
-  const activeFilterCount = (intl ? 1 : 0) + (truck !== 'Orice' ? 1 : 0) + (depart !== 'Oricand' ? 1 : 0);
+  const pricedFeed = feedFiltered.filter(hasIncludedPrice);
+  const baseFeed = priceOnly ? pricedFeed : feedFiltered;
+  const recent =
+    priceOnly && sortPrice !== 'none'
+      ? [...baseFeed].sort((a, b) => {
+          const av = priceValue(a);
+          const bv = priceValue(b);
+          if (av === null && bv === null) return 0;
+          if (av === null) return 1;
+          if (bv === null) return -1;
+          return sortPrice === 'asc' ? av - bv : bv - av;
+        })
+      : baseFeed;
+  const activeFilterCount = (truck !== 'Orice' ? 1 : 0) + (depart !== 'Oricand' ? 1 : 0);
+  const cycleSort = () => setSortPrice((current) => (current === 'none' ? 'asc' : current === 'asc' ? 'desc' : 'none'));
+  const resetFeedFilters = () => {
+    setTruck('Orice');
+    setDepart('Oricand');
+    setPriceOnly(false);
+    setSortPrice('none');
+  };
 
   return (
     <section className="screen-stack feed-screen">
@@ -1241,27 +1474,37 @@ function HomeScreen({
         </button>
       )}
 
-      <div className="feed-chips">
-        <button className={chip === 'Toate' ? 'active' : ''} onClick={() => setChip('Toate')}>
-          Toate
+      <div className="result-filter-bar feed-filter-bar">
+        <button className={`filter-pill ${showFilters || activeFilterCount ? 'active' : ''}`} type="button" onClick={() => setShowFilters((v) => !v)}>
+          <SlidersHorizontal size={15} />
+          Filtre
+          {activeFilterCount > 0 && <span>{activeFilterCount}</span>}
         </button>
-        <button className={chip === 'Cu pret' ? 'active' : ''} onClick={() => setChip('Cu pret')}>
-          Cu preț
+        <button
+          className={`filter-pill ${priceOnly ? 'active' : ''}`}
+          type="button"
+          aria-pressed={priceOnly}
+          onClick={() => setPriceOnly(!priceOnly)}
+        >
+          <ListFilter size={15} />
+          Cu pret
+          <span>{pricedFeed.length}</span>
         </button>
-        <button className={showFilters || activeFilterCount ? 'active' : ''} onClick={() => setShowFilters((v) => !v)}>
-          Filtru{activeFilterCount ? ` (${activeFilterCount})` : ''}
-        </button>
+        {priceOnly && (
+          <button className={`filter-pill ${sortPrice !== 'none' ? 'active' : ''}`} type="button" onClick={cycleSort}>
+            Preț
+            {sortPrice === 'asc' ? <ArrowUp size={15} /> : sortPrice === 'desc' ? <ArrowDown size={15} /> : <ArrowUpDown size={15} />}
+          </button>
+        )}
       </div>
 
       {showFilters && (
         <div className="feed-filter-panel">
-          <div className="filter-group">
-            <span className="filter-label">Rută</span>
-            <div className="filter-chips">
-              <button className={intl ? 'active' : ''} onClick={() => setIntl((v) => !v)}>
-                Doar internațional
-              </button>
-            </div>
+          <div className="feed-filter-head">
+            <span>Filtre</span>
+            <button type="button" onClick={resetFeedFilters}>
+              Reseteaza
+            </button>
           </div>
           <div className="filter-group">
             <span className="filter-label">Tip camion</span>
@@ -1291,13 +1534,19 @@ function HomeScreen({
         <button onClick={onSearch}>Caută</button>
       </div>
 
-      <div className="results-list">
-        {recent.map((load) => (
-          <LoadCard key={load.id} load={load} onClick={() => openLoad(load)} />
-        ))}
-      </div>
-      {recent.length === 0 && (
-        <EmptyState title={status.connected ? 'Nu sunt curse inca. Porneste o cautare.' : 'Conectează WhatsApp ca sa primesti curse.'} />
+      {feedLoading ? (
+        <FeedLoader />
+      ) : (
+        <>
+          <div className="results-list">
+            {recent.map((load) => (
+              <LoadCard key={load.id} load={load} onClick={() => openLoad(load)} />
+            ))}
+          </div>
+          {recent.length === 0 && (
+            <EmptyState title={status.connected ? 'Nu sunt curse inca. Porneste o cautare.' : 'Conectează WhatsApp ca sa primesti curse.'} />
+          )}
+        </>
       )}
     </section>
   );
@@ -1437,12 +1686,7 @@ function SearchScreen({
   onRun: () => void;
   openFilters: () => void;
 }) {
-  const activeFilters = [
-    draft.truckType !== 'Orice',
-    draft.loadDate !== 'Oricand',
-    draft.messageAge !== 'Oricand',
-    draft.radiusKm !== 200
-  ].filter(Boolean).length;
+  const activeFilters = countActiveSearchFilters(draft);
   const [gpsBusy, setGpsBusy] = useState(false);
   const [gpsError, setGpsError] = useState<string | null>(null);
   const detectGps = () => {
@@ -1536,9 +1780,9 @@ function FilterSheet({
 }: {
   open: boolean;
   onClose: () => void;
-  onPrimary: () => void;
-  primaryLabel: string;
-  primaryIcon: ReactNode;
+  onPrimary?: () => void;
+  primaryLabel?: string;
+  primaryIcon?: ReactNode;
   title: string;
   draft: SearchDraft;
   setDraft: (draft: SearchDraft) => void;
@@ -1640,9 +1884,11 @@ function FilterSheet({
             ))}
           </div>
         </div>
-        <button className="primary-button wide" onClick={onPrimary}>
-          {primaryIcon} {primaryLabel}
-        </button>
+        {onPrimary && primaryLabel && (
+          <button className="primary-button wide" onClick={onPrimary}>
+            {primaryIcon} {primaryLabel}
+          </button>
+        )}
       </div>
     </div>
   );
@@ -1701,7 +1947,17 @@ function OriginScreen({
           title="Locatie folosita acum"
           value={draft.origin}
           subtitle={originSubtitle(draft)}
-          action={<Target size={17} />}
+          action={
+            <button
+              className={`sfield-gps ${draft.originSource === 'gps' ? 'on' : ''}`}
+              type="button"
+              onClick={detectGps}
+              disabled={detecting}
+              title="Foloseste GPS"
+            >
+              <Target size={13} /> {detecting ? 'Caut...' : 'GPS'}
+            </button>
+          }
         />
         <form
           className="location-form"
@@ -1715,10 +1971,6 @@ function OriginScreen({
             Aplica locatia
           </button>
         </form>
-        <button className="secondary-button wide" onClick={detectGps} disabled={detecting}>
-          <Target size={16} />
-          {detecting ? 'Detectam GPS...' : 'Foloseste GPS'}
-        </button>
         {gpsStatus && <p className="gps-status">{gpsStatus}</p>}
       </div>
       <div className="section-label">Locatii rapide</div>
@@ -1802,17 +2054,17 @@ function DestinationScreen({
       <StepHeader title="Unde vrei sa mergi?" onBack={onBack} />
       <SearchBox value={filter} onChange={setFilter} placeholder="Cauta tara, oras sau cod postal" />
       <button
-        className="smart-field-button"
+        className="smart-field-button smart-field-button-multiline"
         onClick={() => {
-          setDraft({ ...draft, destination: 'Toate', destinationType: 'all' });
+          setDraft({ ...draft, destination: 'Toate locatiile', destinationType: 'all' });
           onNext();
         }}
       >
         <SmartField
           icon={<Globe2 size={19} />}
-          title="Toate destinatiile"
-          value="Cauta dupa incarcare, indiferent de destinatie"
-          subtitle="Util pentru anunturi fara descarcare scrisa"
+          title="Toate locatiile"
+          value="Cauta doar dupa locul de incarcare"
+          subtitle="Destinatia poate fi oricare"
           action={<ChevronRight size={17} />}
         />
       </button>
@@ -2109,32 +2361,86 @@ function SummaryLine({ icon, label, value, tone }: { icon: ReactNode; label: str
   );
 }
 
+function ResultsRouteBar({
+  query,
+  draft,
+  onChange,
+  onMap
+}: {
+  query: string;
+  draft: SearchDraft;
+  onChange: () => void;
+  onMap: () => void;
+}) {
+  const route = resultsRouteSummary(query, draft);
+  return (
+    <div className="results-route-bar">
+      <button className="results-route-main" type="button" onClick={onChange} aria-label={`Schimba ruta: start ${route.start}, finish ${route.finish}`}>
+        <span className="results-route-point">
+          <span className="results-route-icon start">
+            <Navigation size={15} />
+          </span>
+          <span className="results-route-copy">
+            <small>Start</small>
+            <strong>{route.start}</strong>
+          </span>
+        </span>
+        <span className="results-route-road" aria-hidden="true">
+          <span>
+            <Truck size={7} />
+          </span>
+        </span>
+        <span className="results-route-point finish">
+          <span className="results-route-icon finish">
+            <MapPin size={15} />
+          </span>
+          <span className="results-route-copy">
+            <small>Finish</small>
+            <strong>{route.finish}</strong>
+          </span>
+        </span>
+        <ChevronRight size={15} className="results-route-chev" />
+      </button>
+      <button className="results-route-map" type="button" onClick={onMap}>
+        <MapPinned size={16} />
+        <span>Hartă</span>
+      </button>
+    </div>
+  );
+}
+
 function ResultsScreen({
   query,
   loads,
   priceOnly,
   setPriceOnly,
-  performSearch,
   openLoad,
-  setQuery,
   goMap,
   savedSearches,
-  onToggleAlert
+  onToggleAlert,
+  onNewSearch,
+  onEditSearch,
+  resultFilters,
+  openFilters
 }: {
   query: string;
   loads: Load[];
   priceOnly: boolean;
   setPriceOnly: (value: boolean) => void;
-  performSearch: (query?: string) => void;
   openLoad: (load: Load) => void;
-  setQuery: (value: string) => void;
   goMap: () => void;
   savedSearches: SavedSearch[];
   onToggleAlert: () => void;
+  onNewSearch: () => void;
+  onEditSearch: () => void;
+  resultFilters: SearchDraft;
+  openFilters: () => void;
 }) {
   const [sortPrice, setSortPrice] = useState<'none' | 'asc' | 'desc'>('none');
-  const pricedLoads = loads.filter(hasIncludedPrice);
-  const baseLoads = priceOnly ? pricedLoads : loads;
+  const activeFilterCount = countActiveSearchFilters(resultFilters);
+  const filteredLoads = filterLoadsForResults(loads, resultFilters);
+  const pricedLoads = filteredLoads.filter(hasIncludedPrice);
+  const baseLoads = priceOnly ? pricedLoads : filteredLoads;
   const activeSort = priceOnly ? sortPrice : 'none';
   const visibleLoads =
     activeSort === 'none'
@@ -2147,6 +2453,8 @@ function ResultsScreen({
           if (bv === null) return -1;
           return activeSort === 'asc' ? av - bv : bv - av;
         });
+  const resultCountLabel =
+    priceOnly || activeFilterCount > 0 ? `${visibleLoads.length} din ${loads.length} curse` : `${loads.length} curse`;
   const cycleSort = () => setSortPrice((current) => (current === 'none' ? 'asc' : current === 'asc' ? 'desc' : 'none'));
   const isAlertSaved = savedSearches.some((item) => item.query === query);
 
@@ -2155,7 +2463,7 @@ function ResultsScreen({
       <div className="screen-title-row">
         <div>
           <h2>Rezultate</h2>
-          <small>{priceOnly ? `${visibleLoads.length} din ${loads.length} curse găsite` : `${loads.length} curse găsite`}</small>
+          <small>{resultCountLabel}</small>
         </div>
         <div className="result-actions">
           <button
@@ -2167,21 +2475,19 @@ function ResultsScreen({
             <Bell size={15} />
             {isAlertSaved ? 'Salvat' : 'Alertă'}
           </button>
-          <button className="text-button" onClick={goMap}>
-            <MapPinned size={16} />
-            Hartă
+          <button className="text-button result-new-search-top" onClick={onNewSearch} title="Alta cautare">
+            <Search size={16} />
+            Cautare Nouă
           </button>
         </div>
       </div>
-      <form
-        onSubmit={(event) => {
-          event.preventDefault();
-          performSearch();
-        }}
-      >
-        <SearchBox value={query} onChange={setQuery} placeholder="Cauta rapid..." />
-      </form>
+      <ResultsRouteBar query={query} draft={resultFilters} onChange={onEditSearch} onMap={goMap} />
       <div className="result-filter-bar">
+        <button className={`filter-pill ${activeFilterCount > 0 ? 'active' : ''}`} type="button" onClick={openFilters}>
+          <SlidersHorizontal size={15} />
+          Filtre
+          {activeFilterCount > 0 && <span>{activeFilterCount}</span>}
+        </button>
         <button
           className={`filter-pill ${priceOnly ? 'active' : ''}`}
           type="button"
@@ -2189,7 +2495,7 @@ function ResultsScreen({
           onClick={() => setPriceOnly(!priceOnly)}
         >
           <ListFilter size={15} />
-          Doar cu pret
+          Cu pret
           <span>{pricedLoads.length}</span>
         </button>
         {priceOnly && (
@@ -2204,7 +2510,9 @@ function ResultsScreen({
           <LoadCard key={load.id} load={load} onClick={() => openLoad(load)} />
         ))}
       </div>
-      {visibleLoads.length === 0 && <EmptyState title={priceOnly ? 'Nu exista curse cu pret inclus.' : 'Nu exista curse potrivite.'} />}
+      {visibleLoads.length === 0 && (
+        <EmptyState title={priceOnly || activeFilterCount > 0 ? 'Nu exista curse pentru filtrele active.' : 'Nu exista curse potrivite.'} />
+      )}
     </section>
   );
 }
@@ -2301,10 +2609,11 @@ function LoadCard({ load, onClick }: { load: Load; onClick: () => void }) {
   );
 }
 
-function MapScreen({ openLoad, goList }: { openLoad: (load: Load) => void; goList: () => void }) {
+function MapScreen({ openLoad, goList, hasActiveSearch, searchLoads, onNewSearch }: { openLoad: (load: Load) => void; goList: () => void; hasActiveSearch: boolean; searchLoads: Load[]; onNewSearch: () => void }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<any>(null);
   const layerRef = useRef<any>(null);
+  const zonePreferenceTouchedRef = useRef(false);
   const openRef = useRef(openLoad);
   useEffect(() => {
     openRef.current = openLoad;
@@ -2312,6 +2621,8 @@ function MapScreen({ openLoad, goList }: { openLoad: (load: Load) => void; goLis
 
   const [allLoads, setAllLoads] = useState<Load[]>([]);
   const [fetching, setFetching] = useState(true);
+  const [geoCenter, setGeoCenter] = useState<{ lat: number; lng: number } | null>(null);
+  const [zoneOnly, setZoneOnly] = useState(true);
   const [showFilters, setShowFilters] = useState(false);
   const [priceOnly, setPriceOnly] = usePersistentState('loadhub.map.priceOnly', false);
   const [intlOnly, setIntlOnly] = usePersistentState('loadhub.map.intlOnly', false);
@@ -2323,6 +2634,10 @@ function MapScreen({ openLoad, goList }: { openLoad: (load: Load) => void; goLis
   const [tonMax, setTonMax] = usePersistentState('loadhub.map.tonMax', '');
 
   useEffect(() => {
+    if (hasActiveSearch) {
+      setFetching(false);
+      return;
+    }
     let cancelled = false;
     setFetching(true);
     api
@@ -2337,7 +2652,7 @@ function MapScreen({ openLoad, goList }: { openLoad: (load: Load) => void; goLis
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [hasActiveSearch]);
 
   const ageMinutes: Record<string, number> = {
     'Ultimele 10 minute': 10,
@@ -2354,10 +2669,12 @@ function MapScreen({ openLoad, goList }: { openLoad: (load: Load) => void; goLis
     { label: '24 ore', value: 'Ultima zi' }
   ];
 
+  const sourceLoads = hasActiveSearch ? searchLoads : allLoads;
   const filtered = useMemo(
     () =>
-      allLoads.filter((load) => {
+      sourceLoads.filter((load) => {
         if (typeof load.loadLat !== 'number' || typeof load.loadLon !== 'number') return false;
+        if (!hasActiveSearch && zoneOnly && geoCenter && distanceKm(geoCenter, { lat: load.loadLat, lng: load.loadLon }) > 400) return false;
         if (priceOnly && !hasIncludedPrice(load)) return false;
         if (intlOnly && !(load.loadCountry && load.unloadCountry && load.loadCountry !== load.unloadCountry)) return false;
         if (truck !== 'Orice' && !(load.truckType ?? '').toLowerCase().includes(truck.toLowerCase().slice(0, 4))) return false;
@@ -2373,12 +2690,13 @@ function MapScreen({ openLoad, goList }: { openLoad: (load: Load) => void; goLis
         }
         return true;
       }),
-    [allLoads, priceOnly, intlOnly, truck, age, priceMin, priceMax, tonMin, tonMax]
+    [sourceLoads, hasActiveSearch, zoneOnly, geoCenter, priceOnly, intlOnly, truck, age, priceMin, priceMax, tonMin, tonMax]
   );
 
   const activeCount = [priceOnly, intlOnly, truck !== 'Orice', age !== 'Oricand', Boolean(priceMin), Boolean(priceMax), Boolean(tonMin), Boolean(tonMax)].filter(
     Boolean
   ).length;
+  const zoneActive = !hasActiveSearch && zoneOnly && Boolean(geoCenter);
 
   useEffect(() => {
     const L = (window as unknown as { L?: any }).L;
@@ -2395,7 +2713,11 @@ function MapScreen({ openLoad, goList }: { openLoad: (load: Load) => void; goLis
     mapRef.current = map;
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
-        (position) => map.setView([position.coords.latitude, position.coords.longitude], 7),
+        (position) => {
+          if (!zonePreferenceTouchedRef.current) map.setView([position.coords.latitude, position.coords.longitude], 7);
+          setGeoCenter({ lat: position.coords.latitude, lng: position.coords.longitude });
+          if (!hasActiveSearch && !zonePreferenceTouchedRef.current) setZoneOnly(true);
+        },
         () => undefined,
         { enableHighAccuracy: true, maximumAge: 60000, timeout: 10000 }
       );
@@ -2427,6 +2749,47 @@ function MapScreen({ openLoad, goList }: { openLoad: (load: Load) => void; goLis
     });
   }, [filtered]);
 
+  useEffect(() => {
+    if (hasActiveSearch || zoneOnly) return;
+    const L = (window as unknown as { L?: any }).L;
+    const map = mapRef.current;
+    if (!L || !map || filtered.length === 0) return;
+    const points = filtered
+      .filter((load) => typeof load.loadLat === 'number' && typeof load.loadLon === 'number')
+      .map((load) => [load.loadLat as number, load.loadLon as number]);
+    if (points.length === 0) return;
+    map.fitBounds(L.latLngBounds(points).pad(0.18), { maxZoom: 7 });
+  }, [filtered, hasActiveSearch, zoneOnly]);
+
+  const detectZone = () => {
+    if (!navigator.geolocation) return;
+    zonePreferenceTouchedRef.current = true;
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const c = { lat: position.coords.latitude, lng: position.coords.longitude };
+        setGeoCenter(c);
+        setZoneOnly(true);
+        if (mapRef.current) mapRef.current.setView([c.lat, c.lng], 7);
+      },
+      () => undefined,
+      { enableHighAccuracy: true, maximumAge: 60000, timeout: 10000 }
+    );
+  };
+
+  const toggleZone = () => {
+    zonePreferenceTouchedRef.current = true;
+    if (zoneActive) {
+      setZoneOnly(false);
+      return;
+    }
+    if (geoCenter) {
+      setZoneOnly(true);
+      if (mapRef.current) mapRef.current.setView([geoCenter.lat, geoCenter.lng], 7);
+    } else {
+      detectZone();
+    }
+  };
+
   const resetFilters = () => {
     setPriceOnly(false);
     setIntlOnly(false);
@@ -2443,9 +2806,14 @@ function MapScreen({ openLoad, goList }: { openLoad: (load: Load) => void; goLis
       <div className="map-leaflet-wrap full">
         <div className="map-leaflet" ref={containerRef} />
         <div className="map-topbar">
-          <button className="map-chip-btn" onClick={goList} title="Listă">
-            <ListFilter size={15} /> Listă
+          <button className="map-chip-btn" onClick={onNewSearch} title="Cautare noua">
+            <Search size={15} /> Caută
           </button>
+          {!hasActiveSearch && (
+            <button className={`map-chip-btn ${zoneActive ? 'on' : ''}`} onClick={toggleZone} title="Zona mea (GPS) - apasa pentru on/off">
+              <Navigation size={15} /> Zona mea
+            </button>
+          )}
           <button
             className={`map-chip-btn ${showFilters || activeCount > 0 ? 'on' : ''}`}
             onClick={() => setShowFilters((value) => !value)}
@@ -3246,18 +3614,20 @@ function BottomNav({
   view,
   setView,
   selectedLoad,
-  notificationCount
+  notificationCount,
+  onSearchTab
 }: {
   view: View;
   setView: (view: View) => void;
   selectedLoad: Load | null;
   notificationCount: number;
+  onSearchTab: () => void;
 }) {
   const searchViews: View[] = ['search', 'destination', 'radius', 'confirm', 'searching', 'summary', 'results'];
   return (
     <nav className="bottom-nav" aria-label="Navigare">
       <NavItem icon={<LayoutGrid size={22} />} label="Feed" active={view === 'home'} onClick={() => setView('home')} />
-      <NavItem icon={<Search size={22} />} label="Caută" active={searchViews.includes(view)} onClick={() => setView('search')} />
+      <NavItem icon={<Search size={22} />} label="Caută" active={searchViews.includes(view)} onClick={onSearchTab} />
       <NavItem icon={<MapPinned size={22} />} label="Hartă" active={view === 'map'} onClick={() => setView('map')} />
       <NavItem
         icon={<Bell size={22} />}
