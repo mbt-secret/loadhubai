@@ -1486,31 +1486,33 @@ function HomeScreen({
         </button>
       )}
 
-      <div className="result-filter-bar feed-filter-bar">
-        <button className={`filter-pill ${showFilters || activeFilterCount ? 'active' : ''}`} type="button" onClick={() => setShowFilters((v) => !v)}>
-          <SlidersHorizontal size={15} />
-          Filtre
-          {activeFilterCount > 0 && <span>{activeFilterCount}</span>}
-        </button>
-        <button
-          className={`filter-pill ${priceOnly ? 'active' : ''}`}
-          type="button"
-          aria-pressed={priceOnly}
-          onClick={() => setPriceOnly(!priceOnly)}
-        >
-          <ListFilter size={15} />
-          Cu pret
-          <span>{pricedFeed.length}</span>
-        </button>
-        {priceOnly && (
-          <button className={`filter-pill ${sortPrice !== 'none' ? 'active' : ''}`} type="button" onClick={cycleSort}>
-            Preț
-            {sortPrice === 'asc' ? <ArrowUp size={15} /> : sortPrice === 'desc' ? <ArrowDown size={15} /> : <ArrowUpDown size={15} />}
+      {!feedLoading && (
+        <div className="result-filter-bar feed-filter-bar">
+          <button className={`filter-pill ${showFilters || activeFilterCount ? 'active' : ''}`} type="button" onClick={() => setShowFilters((v) => !v)}>
+            <SlidersHorizontal size={15} />
+            Filtre
+            {activeFilterCount > 0 && <span>{activeFilterCount}</span>}
           </button>
-        )}
-      </div>
+          <button
+            className={`filter-pill ${priceOnly ? 'active' : ''}`}
+            type="button"
+            aria-pressed={priceOnly}
+            onClick={() => setPriceOnly(!priceOnly)}
+          >
+            <ListFilter size={15} />
+            Cu pret
+            <span>{pricedFeed.length}</span>
+          </button>
+          {priceOnly && (
+            <button className={`filter-pill ${sortPrice !== 'none' ? 'active' : ''}`} type="button" onClick={cycleSort}>
+              Preț
+              {sortPrice === 'asc' ? <ArrowUp size={15} /> : sortPrice === 'desc' ? <ArrowDown size={15} /> : <ArrowUpDown size={15} />}
+            </button>
+          )}
+        </div>
+      )}
 
-      {showFilters && (
+      {!feedLoading && showFilters && (
         <div className="feed-filter-panel">
           <div className="feed-filter-head">
             <span>Filtre</span>
@@ -1541,10 +1543,12 @@ function HomeScreen({
         </div>
       )}
 
-      <div className="recent-header">
-        <strong>Curse noi</strong>
-        <button onClick={onSearch}>Caută</button>
-      </div>
+      {!feedLoading && (
+        <div className="recent-header">
+          <strong>Curse noi</strong>
+          <button onClick={onSearch}>Caută</button>
+        </div>
+      )}
 
       {feedLoading ? (
         <FeedLoader />
@@ -2075,8 +2079,7 @@ function DestinationScreen({
         <SmartField
           icon={<Globe2 size={19} />}
           title="Toate locatiile"
-          value="Cauta doar dupa locul de incarcare"
-          subtitle="Destinatia poate fi oricare"
+          value="Destinatia poate fi oricare"
           action={<ChevronRight size={17} />}
         />
       </button>
@@ -2385,35 +2388,81 @@ function ResultsRouteBar({
   onMap: () => void;
 }) {
   const route = resultsRouteSummary(query, draft);
-  const longestRouteName = Math.max(route.start.length, route.finish.length);
-  const roadSizeClass = longestRouteName >= 13 ? 'compact' : longestRouteName >= 9 ? 'balanced' : 'roomy';
+  const routeMainRef = useRef<HTMLButtonElement | null>(null);
+  const startCopyRef = useRef<HTMLSpanElement | null>(null);
+  const finishCopyRef = useRef<HTMLSpanElement | null>(null);
+  const [roadDots, setRoadDots] = useState(5);
+  const roadWidth = Math.max(18, roadDots * 3 + (roadDots - 1) * 4);
+
+  useEffect(() => {
+    const measureCopy = (node: HTMLSpanElement | null) => {
+      if (!node) return 0;
+      const label = node.querySelector('small');
+      const value = node.querySelector('strong');
+      return Math.ceil(Math.max(label?.scrollWidth ?? 0, value?.scrollWidth ?? 0));
+    };
+    const widthForDots = (dots: number) => Math.max(18, dots * 3 + (dots - 1) * 4);
+    const updateDots = () => {
+      const main = routeMainRef.current;
+      if (!main) return;
+      const routeTextWidth = measureCopy(startCopyRef.current) + measureCopy(finishCopyRef.current);
+      const fixedWidth = 30 * 2 + 6 * 2 + 7 * 2;
+      const availableForRoad = main.clientWidth - routeTextWidth - fixedWidth;
+      let nextDots = 7;
+      while (nextDots > 2 && widthForDots(nextDots) > availableForRoad) nextDots -= 1;
+      setRoadDots(nextDots);
+    };
+
+    updateDots();
+    let observer: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined' && routeMainRef.current) {
+      observer = new ResizeObserver(updateDots);
+      observer.observe(routeMainRef.current);
+    }
+    window.addEventListener('resize', updateDots);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener('resize', updateDots);
+    };
+  }, [route.start, route.finish]);
+
   return (
     <div className="results-route-bar">
-      <button className="results-route-main" type="button" onClick={onChange} aria-label={`Schimba ruta: start ${route.start}, finish ${route.finish}`}>
+      <button
+        className="results-route-main"
+        type="button"
+        onClick={onChange}
+        aria-label={`Schimba ruta: start ${route.start}, finish ${route.finish}`}
+        ref={routeMainRef}
+      >
         <span className="results-route-point">
           <span className="results-route-icon start">
             <Navigation size={15} />
           </span>
-          <span className="results-route-copy">
+          <span className="results-route-copy" ref={startCopyRef}>
             <small>Start</small>
             <strong>{route.start}</strong>
           </span>
         </span>
-        <span className={`results-route-road ${roadSizeClass}`} aria-hidden="true">
-          <span>
+        <span className="results-route-road" aria-hidden="true" style={{ flexBasis: roadWidth }}>
+          <span className="results-route-truck">
             <Truck size={7} />
+          </span>
+          <span className="results-route-dots">
+            {Array.from({ length: roadDots }, (_, index) => (
+              <i key={index} />
+            ))}
           </span>
         </span>
         <span className="results-route-point finish">
           <span className="results-route-icon finish">
             <MapPin size={15} />
           </span>
-          <span className="results-route-copy">
+          <span className="results-route-copy" ref={finishCopyRef}>
             <small>Finish</small>
             <strong>{route.finish}</strong>
           </span>
         </span>
-        <ChevronRight size={15} className="results-route-chev" />
       </button>
       <button className="results-route-map" type="button" onClick={onMap}>
         <MapPinned size={16} />
