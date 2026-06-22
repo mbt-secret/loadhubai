@@ -1,6 +1,6 @@
 {
-  "name": "LoadHUB AI",
-  "short_name": "LoadHUB",
+  "name": "TIRGo",
+  "short_name": "TIRGo",
   "description": "Asistent AI pentru gasirea curselor din grupuri si surse logistice.",
   "lang": "ro",
   "start_url": "/",

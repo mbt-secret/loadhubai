@@ -532,5 +532,5 @@ app.use((error, req, res, next) => {
 startGeotransAutoSync();
 
 app.listen(port, host, () => {
-  console.log(`TIRGo server: http://${host}:${port}`);
+  console.log(`LoadHUB AI server: http://${host}:${port}`);
 });

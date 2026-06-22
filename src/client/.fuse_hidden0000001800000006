@@ -759,10 +759,10 @@ function App() {
       <div className="brand-panel" aria-hidden="true">
         <div className="brand-icon">
           <Truck size={38} />
-          <Navigation size={18} />
+          <Sparkles size={18} />
         </div>
         <h1>
-          TIR<span>Go</span>
+          CargoCopilot <span>AI</span>
         </h1>
         <p>Asistentul tau AI pentru gasirea curselor.</p>
         <ul>
@@ -773,7 +773,7 @@ function App() {
         </ul>
       </div>
 
-      <section className="phone-shell" aria-label="TIRGo">
+      <section className="phone-shell" aria-label="CargoCopilot AI">
         <PhoneStatus />
         {error && (
           <div className="notice error">
@@ -1020,7 +1020,7 @@ function InstallPrompt({ onInstall, onClose }: { onInstall: () => void; onClose:
         <Download size={18} />
       </span>
       <div className="install-prompt-copy">
-        <strong>Instaleaza TIRGo</strong>
+        <strong>Instaleaza LoadHUB AI</strong>
         <small>Adauga iconita pe telefon si deschide aplicatia pe tot ecranul.</small>
       </div>
       <div className="install-prompt-actions">

@@ -277,7 +277,7 @@ export class WhatsappAdapter extends EventEmitter {
 
     const groupFilter = this.page
       .locator('button, div[role="button"]')
-      .filter({ hasText: /^(Groups|Grupuri|Grupos|Gruppen|Groupes|Gruppi)$/i })
+      .filter({ hasText: /^(Groups|Grupuri|Grupos|Gruppen|Groupes|Gruppi|Gruplar|Группы)$/i })
       .first();
     if ((await groupFilter.count().catch(() => 0)) > 0) {
       await groupFilter.click({ timeout: 1500 }).catch(() => {});
@@ -291,53 +291,19 @@ export class WhatsappAdapter extends EventEmitter {
         document.querySelector('[aria-label*="chat"]') ??
         document;
       const ignored = /^(online|typing|search|cauta|arhivat|archived|toate|all|necitite|unread|favorite|favourites|groups|grupuri)$/i;
-      const keywords = [
-        'curs',
-        'transport',
-        'logistic',
-        'lojistik',
-        'locistik',
-        'nakliye',
-        'yuk',
-        'yük',
-        'marf',
-        'gruz',
-        'груз',
-        'perevoz',
-        'перевоз',
-        'incarc',
-        'tir',
-        'camion',
-        'lkw',
-        'truck',
-        'dorse',
-        'bursa',
-        'sped',
-        'cargo',
-        'frigo',
-        'transfer',
-        'tasimacilik',
-        'taşımac',
-        'tasıma'
-      ];
-      const routeWords = ['romania', 'turcia', 'turkiye', 'ukraina', 'germania', 'italia', 'bulgaria', 'avrupa', 'europa', 'balkan'];
       const names = [];
 
       const add = (value) => {
         const rawName = String(value ?? '');
         if (/[\r\n\u202A-\u202E]/.test(rawName)) return;
         const name = rawName.replace(/\s+/g, ' ').trim();
-        const normalized = name.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
         if (!name) return;
         if (name.length < 2 || name.length > 120) return;
         if (/^\d{1,2}:\d{2}$/.test(name)) return;
         if (/^\+?[\d\s().-]{7,}$/.test(name)) return;
         if (/^\d+\s*(mesaje?|messages?)$/i.test(name)) return;
         if (ignored.test(name)) return;
-        if (!keywords.some((keyword) => normalized.includes(keyword))) {
-          const routeHits = routeWords.filter((word) => normalized.includes(word)).length;
-          if (routeHits < 2) return;
-        }
+        // Captureaza TOATE grupurile (fara filtru de cuvinte-cheie).
         names.push(name);
       };
 
@@ -354,6 +320,7 @@ export class WhatsappAdapter extends EventEmitter {
 
       return Array.from(new Set(names)).map((name) => ({ name, whatsappId: name }));
     });
+    console.log(`[whatsapp] refreshGroups: ${groups.length} grup(uri) gasite in WhatsApp Web.`);
     this.onGroups(groups);
     this.setStatus({ lastSyncAt: nowIso() });
     return groups;

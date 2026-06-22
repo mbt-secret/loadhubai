@@ -485,16 +485,29 @@ export function findLoadDate(rawText, baseDate = new Date()) {
     }
   }
 
+  const iso = text.match(/\b(\d{4})[./-](\d{1,2})[./-](\d{1,2})\b/);
+  if (iso) {
+    const year = Number.parseInt(iso[1], 10);
+    const month = Number.parseInt(iso[2], 10) - 1;
+    const day = Number.parseInt(iso[3], 10);
+    if (month >= 0 && month <= 11 && day >= 1 && day <= 31) {
+      const date = new Date(year, month, day, 12, 0, 0, 0);
+      if (!Number.isNaN(date.getTime())) return date.toISOString().slice(0, 10);
+    }
+  }
+
   const explicit = text.match(/\b(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?\b/);
   if (explicit) {
     const day = Number.parseInt(explicit[1], 10);
     const month = Number.parseInt(explicit[2], 10) - 1;
-    const currentYear = baseDate.getFullYear();
-    const year = explicit[3]
-      ? Number.parseInt(explicit[3].length === 2 ? `20${explicit[3]}` : explicit[3], 10)
-      : currentYear;
-    const date = new Date(year, month, day, 12, 0, 0, 0);
-    if (!Number.isNaN(date.getTime())) return date.toISOString().slice(0, 10);
+    if (month >= 0 && month <= 11 && day >= 1 && day <= 31) {
+      const currentYear = baseDate.getFullYear();
+      const year = explicit[3]
+        ? Number.parseInt(explicit[3].length === 2 ? `20${explicit[3]}` : explicit[3], 10)
+        : currentYear;
+      const date = new Date(year, month, day, 12, 0, 0, 0);
+      if (!Number.isNaN(date.getTime())) return date.toISOString().slice(0, 10);
+    }
   }
 
   return null;

@@ -174,7 +174,7 @@ export async function fetchGeotransCargo({ pageIndex = 0, pageSize = 50 } = {}) 
   const today = new Date().toISOString().slice(0, 10);
   const body = {
     lang: 'ro',
-    clientName: 'TIRGo Local',
+    clientName: 'LoadHUBAI Local',
     query: {
       filterKey: 'auto',
       countriesFrom: [],
@@ -203,7 +203,7 @@ export async function fetchGeotransCargo({ pageIndex = 0, pageSize = 50 } = {}) 
       'content-type': 'application/json',
       origin: 'https://geotrans.md',
       referer: 'https://geotrans.md/cargo/search',
-      'user-agent': 'Mozilla/5.0 TIRGo Local'
+      'user-agent': 'Mozilla/5.0 LoadHUBAI Local'
     },
     body: JSON.stringify(body)
   });
