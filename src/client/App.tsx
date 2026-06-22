@@ -75,7 +75,8 @@ type View =
   | 'detail'
   | 'notifications'
   | 'settings'
-  | 'saved';
+  | 'saved'
+  | 'savedOffers';
 
 type SearchDraft = {
   origin: string;
@@ -421,6 +422,87 @@ function writeAlertDraft(id: number, draft: SearchDraft) {
   localStorage.setItem('loadhub.alertFilters', JSON.stringify(all));
 }
 
+function usePersistentState<T>(
+  key: string,
+  defaults: T,
+  ttlMs = 3600000
+): [T, (value: T | ((prev: T) => T)) => void] {
+  const readStored = (): T => {
+    try {
+      const raw = localStorage.getItem(key);
+      if (!raw) return defaults;
+      const parsed = JSON.parse(raw) as { t?: number; v?: T };
+      if (!parsed || typeof parsed.t !== 'number' || Date.now() - parsed.t > ttlMs) {
+        localStorage.removeItem(key);
+        return defaults;
+      }
+      return (parsed.v ?? defaults) as T;
+    } catch {
+      return defaults;
+    }
+  };
+  const [state, setState] = useState<T>(readStored);
+  const set = (value: T | ((prev: T) => T)) => {
+    setState((prev) => {
+      const next = typeof value === 'function' ? (value as (p: T) => T)(prev) : value;
+      try {
+        localStorage.setItem(key, JSON.stringify({ t: Date.now(), v: next }));
+      } catch {
+        // ignore storage errors
+      }
+      return next;
+    });
+  };
+  useEffect(() => {
+    let raw: string | null = null;
+    try {
+      raw = localStorage.getItem(key);
+    } catch {
+      return;
+    }
+    if (!raw) return;
+    let stamp: number | null = null;
+    try {
+      const parsed = JSON.parse(raw) as { t?: number };
+      stamp = typeof parsed.t === 'number' ? parsed.t : null;
+    } catch {
+      return;
+    }
+    if (stamp === null) return;
+    const remaining = stamp + ttlMs - Date.now();
+    const clear = () => {
+      try { localStorage.removeItem(key); } catch { /* ignore */ }
+      setState(defaults);
+    };
+    if (remaining <= 0) {
+      clear();
+      return;
+    }
+    const id = setTimeout(clear, remaining);
+    return () => clearTimeout(id);
+  }, [state]);
+  return [state, set];
+}
+
+const SAVED_OFFERS_KEY = 'loadhub.savedOffers';
+function readSavedOffers(): Load[] {
+  try {
+    const raw = localStorage.getItem(SAVED_OFFERS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as Load[]) : [];
+  } catch {
+    return [];
+  }
+}
+function writeSavedOffers(offers: Load[]) {
+  try {
+    localStorage.setItem(SAVED_OFFERS_KEY, JSON.stringify(offers));
+  } catch {
+    // ignore storage errors
+  }
+}
+
 function App() {
   const [view, setView] = useState<View>('home');
   const [status, setStatus] = useState<WhatsappStatus>(emptyStatus);
@@ -429,6 +511,7 @@ function App() {
   const [feedLoads, setFeedLoads] = useState<Load[]>([]);
   const [selectedLoad, setSelectedLoad] = useState<Load | null>(null);
   const [savedSearches, setSavedSearches] = useState<SavedSearch[]>([]);
+  const [savedOffers, setSavedOffers] = useState<Load[]>(() => readSavedOffers());
   const [settings, setSettings] = useState<LocalSettings>(defaultSettings);
   const [query, setQuery] = useState('');
   const [searchDraft, setSearchDraft] = useState<SearchDraft>(initialSearchDraft);
@@ -630,6 +713,11 @@ function App() {
     });
   }
 
+  function searchBell() {
+    // Clopotelul din ecranul Cautare deschide doar pagina Alerte (salvarea se face din rezultate).
+    setView('notifications');
+  }
+
   async function toggleAlert() {
     const searchQuery = query.trim() || buildDraftQuery();
     if (!searchQuery) return;
@@ -707,6 +795,15 @@ function App() {
     await run(async () => {
       const nextGroup = await api.updateGroup(group.id, { isActive: !group.isActive });
       setGroups((current) => current.map((item) => (item.id === nextGroup.id ? nextGroup : item)));
+    });
+  }
+
+  function toggleSavedOffer(load: Load) {
+    setSavedOffers((current) => {
+      const exists = current.some((item) => item.id === load.id);
+      const next = exists ? current.filter((item) => item.id !== load.id) : [load, ...current];
+      writeSavedOffers(next);
+      return next;
     });
   }
 
@@ -819,7 +916,7 @@ function App() {
               query={query}
               setQuery={setQuery}
               performSearch={performSearch}
-              saveSearch={saveSearch}
+              saveSearch={searchBell}
               savedSearches={savedSearches}
               draft={searchDraft}
               setDraft={setSearchDraft}
@@ -894,6 +991,8 @@ function App() {
               load={selectedLoad}
               loading={loading}
               onBack={() => setView('results')}
+              isSaved={savedOffers.some((item) => item.id === selectedLoad.id)}
+              onToggleSave={() => toggleSavedOffer(selectedLoad)}
               onAnalyze={() => analyzeLoad(selectedLoad)}
               onSave={async (patch) => {
                 await run(async () => {
@@ -952,6 +1051,9 @@ function App() {
               }}
             />
           )}
+          {view === 'savedOffers' && (
+            <SavedOffersScreen savedOffers={savedOffers} openLoad={openLoad} onBack={() => setView('settings')} />
+          )}
           {view === 'settings' && (
             <SettingsScreen
               status={status}
@@ -971,6 +1073,8 @@ function App() {
               }}
               onSyncGeotrans={syncGeotrans}
               onToggleGroup={toggleGroup}
+              onOpenSaved={() => setView('savedOffers')}
+              savedOffersCount={savedOffers.length}
               onClearData={async () => {
                 if (!window.confirm('Stergi mesajele, cursele, grupurile si sesiunea WhatsApp locala?')) return;
                 await run(async () => {
@@ -1064,7 +1168,11 @@ function HomeScreen({
   onSearch: () => void;
   onAlerts: () => void;
 }) {
-  const [chip, setChip] = useState<'Toate' | 'Cu pret' | 'International'>('Toate');
+  const [chip, setChip] = usePersistentState<'Toate' | 'Cu pret'>('loadhub.feed.chip', 'Toate');
+  const [showFilters, setShowFilters] = useState(false);
+  const [intl, setIntl] = usePersistentState('loadhub.feed.intl', false);
+  const [truck, setTruck] = usePersistentState('loadhub.feed.truck', 'Orice');
+  const [depart, setDepart] = usePersistentState<'Oricand' | 'Astazi' | 'Maine' | '3 zile'>('loadhub.feed.depart', 'Oricand');
   const activeGroups = groups.filter((group) => group.isActive).length;
   const pricedCount = loads.filter(hasIncludedPrice).length;
   const sorted = [...loads].sort((a, b) => {
@@ -1072,12 +1180,19 @@ function HomeScreen({
     const timeB = new Date(b.messageTime ?? b.capturedAt).getTime() || 0;
     return timeB - timeA;
   });
-  const internationalLoads = sorted.filter(
-    (load) => load.loadCountry && load.unloadCountry && load.loadCountry !== load.unloadCountry
-  );
-  const filtered =
-    chip === 'Cu pret' ? sorted.filter(hasIncludedPrice) : chip === 'International' ? internationalLoads : sorted;
-  const recent = filtered;
+  const filtered = chip === 'Cu pret' ? sorted.filter(hasIncludedPrice) : sorted;
+  const recent = filtered.filter((load) => {
+    if (intl && !(load.loadCountry && load.unloadCountry && load.loadCountry !== load.unloadCountry)) return false;
+    if (truck !== 'Orice' && !(load.truckType ?? '').toLowerCase().includes(truck.toLowerCase().slice(0, 4))) return false;
+    if (depart !== 'Oricand') {
+      const d = loadDayDiff(load.loadDate);
+      if (depart === 'Astazi' && d !== 0) return false;
+      if (depart === 'Maine' && d !== 1) return false;
+      if (depart === '3 zile' && !(d !== null && d >= 0 && d <= 3)) return false;
+    }
+    return true;
+  });
+  const activeFilterCount = (intl ? 1 : 0) + (truck !== 'Orice' ? 1 : 0) + (depart !== 'Oricand' ? 1 : 0);
 
   return (
     <section className="screen-stack feed-screen">
@@ -1133,10 +1248,43 @@ function HomeScreen({
         <button className={chip === 'Cu pret' ? 'active' : ''} onClick={() => setChip('Cu pret')}>
           Cu preț
         </button>
-        <button className={chip === 'International' ? 'active' : ''} onClick={() => setChip('International')}>
-          Internațional
+        <button className={showFilters || activeFilterCount ? 'active' : ''} onClick={() => setShowFilters((v) => !v)}>
+          Filtru{activeFilterCount ? ` (${activeFilterCount})` : ''}
         </button>
       </div>
+
+      {showFilters && (
+        <div className="feed-filter-panel">
+          <div className="filter-group">
+            <span className="filter-label">Rută</span>
+            <div className="filter-chips">
+              <button className={intl ? 'active' : ''} onClick={() => setIntl((v) => !v)}>
+                Doar internațional
+              </button>
+            </div>
+          </div>
+          <div className="filter-group">
+            <span className="filter-label">Tip camion</span>
+            <div className="filter-chips">
+              {['Orice', 'Prelată', 'Frigo', 'Mega', 'Basculantă'].map((t) => (
+                <button key={t} className={truck === t ? 'active' : ''} onClick={() => setTruck(t)}>
+                  {t}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="filter-group">
+            <span className="filter-label">Plecare</span>
+            <div className="filter-chips">
+              {([['Oricand', 'Oricând'], ['Astazi', 'Astăzi'], ['Maine', 'Mâine'], ['3 zile', '3 zile']] as const).map(([v, l]) => (
+                <button key={v} className={depart === v ? 'active' : ''} onClick={() => setDepart(v)}>
+                  {l}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="recent-header">
         <strong>Curse noi</strong>
@@ -1324,7 +1472,7 @@ function SearchScreen({
           <h2 className="search-h">Caută curse</h2>
           <p className="search-sub">Setează ruta și filtrele tale</p>
         </div>
-        <button className="feed-bell" onClick={saveSearch} title="Salvează căutarea">
+        <button className="feed-bell" onClick={saveSearch} title="Alerte">
           <Bell size={20} />
         </button>
       </div>
@@ -2061,7 +2209,70 @@ function ResultsScreen({
   );
 }
 
+let etaTickListeners = new Set<(t: number) => void>();
+let etaTickTimer: ReturnType<typeof setInterval> | null = null;
+function useMinuteTick() {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const fn = (t: number) => setNow(t);
+    etaTickListeners.add(fn);
+    if (!etaTickTimer) {
+      etaTickTimer = setInterval(() => {
+        const t = Date.now();
+        etaTickListeners.forEach((listener) => listener(t));
+      }, 60000);
+    }
+    return () => {
+      etaTickListeners.delete(fn);
+      if (etaTickListeners.size === 0 && etaTickTimer) {
+        clearInterval(etaTickTimer);
+        etaTickTimer = null;
+      }
+    };
+  }, []);
+  return now;
+}
+
+function formatTimeUntilLoad(
+  loadDate: string | null,
+  now: number
+): { label: string; tone: 'today' | 'future' | 'past' } | null {
+  if (!loadDate) return null;
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(loadDate);
+  if (!match) return null;
+  const target = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 0, 0, 0, 0);
+  if (Number.isNaN(target.getTime())) return null;
+  const nowDate = new Date(now);
+  const todayMidnight = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate());
+  const dayDiff = Math.round((target.getTime() - todayMidnight.getTime()) / 86400000);
+  if (dayDiff === 0) return { label: 'Astăzi', tone: 'today' };
+  if (dayDiff < 0) return { label: 'Expirat', tone: 'past' };
+  const ms = Math.max(0, target.getTime() - now);
+  const totalMinutes = Math.floor(ms / 60000);
+  const days = Math.floor(totalMinutes / 1440);
+  const hours = Math.floor((totalMinutes % 1440) / 60);
+  const minutes = totalMinutes % 60;
+  let label: string;
+  if (days > 0) label = `în ${days}z ${hours}h`;
+  else if (hours > 0) label = `în ${hours}h ${minutes}m`;
+  else label = `în ${minutes}m`;
+  return { label, tone: 'future' };
+}
+
+function loadDayDiff(loadDate: string | null): number | null {
+  if (!loadDate) return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(loadDate);
+  if (!m) return null;
+  const target = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  if (Number.isNaN(target.getTime())) return null;
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  return Math.round((target.getTime() - today.getTime()) / 86400000);
+}
+
 function LoadCard({ load, onClick }: { load: Load; onClick: () => void }) {
+  const now = useMinuteTick();
+  const eta = formatTimeUntilLoad(load.loadDate, now);
   const flag = countryCodeFromName(load.unloadCountry) || countryCodeFromName(load.loadCountry) || 'EU';
   const meta = [load.weightTons ? `${load.weightTons}t` : null, load.truckType, formatDate(load.loadDate), load.groupName]
     .filter(Boolean)
@@ -2078,6 +2289,11 @@ function LoadCard({ load, onClick }: { load: Load; onClick: () => void }) {
         <span className="load-meta">{meta}</span>
       </span>
       <span className="load-right">
+        {eta && (
+          <span className={`load-eta load-eta-${eta.tone}`} title="Timp pana la plecare">
+            <Clock size={12} /> {eta.label}
+          </span>
+        )}
         <span className="load-amt">{load.price ?? 'n/a'}</span>
         <span className="load-time">{formatTime(load.messageTime ?? load.capturedAt)}</span>
       </span>
@@ -2097,14 +2313,14 @@ function MapScreen({ openLoad, goList }: { openLoad: (load: Load) => void; goLis
   const [allLoads, setAllLoads] = useState<Load[]>([]);
   const [fetching, setFetching] = useState(true);
   const [showFilters, setShowFilters] = useState(false);
-  const [priceOnly, setPriceOnly] = useState(false);
-  const [intlOnly, setIntlOnly] = useState(false);
-  const [truck, setTruck] = useState('Orice');
-  const [age, setAge] = useState('Oricand');
-  const [priceMin, setPriceMin] = useState('');
-  const [priceMax, setPriceMax] = useState('');
-  const [tonMin, setTonMin] = useState('');
-  const [tonMax, setTonMax] = useState('');
+  const [priceOnly, setPriceOnly] = usePersistentState('loadhub.map.priceOnly', false);
+  const [intlOnly, setIntlOnly] = usePersistentState('loadhub.map.intlOnly', false);
+  const [truck, setTruck] = usePersistentState('loadhub.map.truck', 'Orice');
+  const [age, setAge] = usePersistentState('loadhub.map.age', 'Oricand');
+  const [priceMin, setPriceMin] = usePersistentState('loadhub.map.priceMin', '');
+  const [priceMax, setPriceMax] = usePersistentState('loadhub.map.priceMax', '');
+  const [tonMin, setTonMin] = usePersistentState('loadhub.map.tonMin', '');
+  const [tonMax, setTonMax] = usePersistentState('loadhub.map.tonMax', '');
 
   useEffect(() => {
     let cancelled = false;
@@ -2312,13 +2528,17 @@ function DetailScreen({
   loading,
   onBack,
   onAnalyze,
-  onSave
+  onSave,
+  isSaved,
+  onToggleSave
 }: {
   load: Load;
   loading: boolean;
   onBack: () => void;
   onAnalyze: () => void;
   onSave: (patch: Partial<Load>) => Promise<void>;
+  isSaved: boolean;
+  onToggleSave: () => void;
 }) {
   const translatedText =
     load.translatedText && load.translatedText.trim() !== load.originalText.trim() ? load.translatedText.trim() : null;
@@ -2341,7 +2561,9 @@ function DetailScreen({
           ‹
         </button>
         <h3>Detaliu cursa</h3>
-        <span />
+        <button className={`save-offer-btn${isSaved ? ' saved' : ''}`} onClick={onToggleSave}>
+          <Bookmark size={16} /> {isSaved ? 'Salvat' : 'Salvează'}
+        </button>
       </div>
       <div className="route-viz">
         <div className="route-rail">
@@ -2474,6 +2696,7 @@ function NotificationsScreen({
   onDeleteSearch: (search: SavedSearch) => void;
   onEditAlert: (search: SavedSearch) => void;
 }) {
+  const now = useMinuteTick();
   return (
     <section className="screen-stack">
       <ScreenHeader title="Alerte" subtitle="Căutările salvate și cursele noi găsite." />
@@ -2513,21 +2736,56 @@ function NotificationsScreen({
         <b>Activitate recentă</b>
       </div>
       {notifications.length === 0 && <div className="empty-inline">Nicio cursă nouă încă. Te anunțăm când apare ceva pentru alertele tale.</div>}
-      {notifications.map((load) => (
-        <button className="notification-card" key={load.id} onClick={() => openLoad(load)}>
-          <span className={`mini-icon ${hasIncludedPrice(load) ? 'green' : 'amber'}`}>
-            {hasIncludedPrice(load) ? <MapPin size={16} /> : <Bell size={16} />}
-          </span>
-          <div>
-            <strong>Cursă nouă potrivită</strong>
-            <small>{compactRoute(load)} · {load.price ?? 'pret n/a'}</small>
-          </div>
-          <div className="notif-meta">
-            <span className="match-pill">Potrivire</span>
-            <small>{formatTime(load.capturedAt)}</small>
-          </div>
+      {notifications.map((load) => {
+        const eta = formatTimeUntilLoad(load.loadDate, now);
+        return (
+          <button className="notification-card" key={load.id} onClick={() => openLoad(load)}>
+            <span className={`mini-icon ${hasIncludedPrice(load) ? 'green' : 'amber'}`}>
+              {hasIncludedPrice(load) ? <MapPin size={16} /> : <Bell size={16} />}
+            </span>
+            <div>
+              <strong>Cursă nouă potrivită</strong>
+              <small>{compactRoute(load)} · {load.price ?? 'pret n/a'}</small>
+            </div>
+            <div className="notif-meta">
+              {eta && (
+                <span className={`load-eta load-eta-${eta.tone}`} title="Timp pana la plecare">
+                  <Clock size={12} /> {eta.label}
+                </span>
+              )}
+              <small>{formatTime(load.capturedAt)}</small>
+            </div>
+          </button>
+        );
+      })}
+    </section>
+  );
+}
+
+function SavedOffersScreen({
+  savedOffers,
+  openLoad,
+  onBack
+}: {
+  savedOffers: Load[];
+  openLoad: (load: Load) => void;
+  onBack: () => void;
+}) {
+  return (
+    <section className="screen-stack">
+      <div className="detail-top">
+        <button className="back-button" onClick={onBack}>
+          ‹
         </button>
-      ))}
+        <h3>Cautari Salvate</h3>
+        <span />
+      </div>
+      <div className="results-list">
+        {savedOffers.map((load) => (
+          <LoadCard key={load.id} load={load} onClick={() => openLoad(load)} />
+        ))}
+      </div>
+      {savedOffers.length === 0 && <EmptyState title="Nu ai oferte salvate. Deschide o cursă și apasă Salvează." />}
     </section>
   );
 }
@@ -2581,7 +2839,9 @@ function SettingsScreen({
   onToggleSettings,
   onSyncGeotrans,
   onToggleGroup,
-  onClearData
+  onClearData,
+  onOpenSaved,
+  savedOffersCount
 }: {
   status: WhatsappStatus;
   settings: LocalSettings;
@@ -2595,6 +2855,8 @@ function SettingsScreen({
   onSyncGeotrans: () => void;
   onToggleGroup: (group: Group) => void;
   onClearData: () => void;
+  onOpenSaved: () => void;
+  savedOffersCount: number;
 }) {
   const activeGroupCount = groups.filter((group) => group.isActive).length;
   const defaultConnectionOrder: Array<'whatsapp' | 'viber'> = ['whatsapp', 'viber'];
@@ -2879,8 +3141,8 @@ function SettingsScreen({
             <RowIcon icon={<Languages size={17} />} title="Limba aplicatiei" subtitle="Romana" />
             <ChevronRight size={17} />
           </div>
-          <div className="compact-row">
-            <RowIcon icon={<BellOff size={17} />} title="Cautari salvate" subtitle={`${savedSearches.length} salvate`} />
+          <div className="compact-row compact-row-link" onClick={onOpenSaved}>
+            <RowIcon icon={<Bookmark size={17} />} title="Cautari Salvate" subtitle={`${savedOffersCount} salvate`} />
             <ChevronRight size={17} />
           </div>
         </div>
