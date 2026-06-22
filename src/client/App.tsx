@@ -2385,6 +2385,8 @@ function ResultsRouteBar({
   onMap: () => void;
 }) {
   const route = resultsRouteSummary(query, draft);
+  const longestRouteName = Math.max(route.start.length, route.finish.length);
+  const roadSizeClass = longestRouteName >= 13 ? 'compact' : longestRouteName >= 9 ? 'balanced' : 'roomy';
   return (
     <div className="results-route-bar">
       <button className="results-route-main" type="button" onClick={onChange} aria-label={`Schimba ruta: start ${route.start}, finish ${route.finish}`}>
@@ -2397,7 +2399,7 @@ function ResultsRouteBar({
             <strong>{route.start}</strong>
           </span>
         </span>
-        <span className="results-route-road" aria-hidden="true">
+        <span className={`results-route-road ${roadSizeClass}`} aria-hidden="true">
           <span>
             <Truck size={7} />
           </span>

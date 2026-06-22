@@ -389,6 +389,18 @@ button:disabled {
   color: var(--violet-soft);
 }
 
+.screen-title-row > div:first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.screen-title-row h2,
+.screen-title-row small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .ai-badge {
   display: inline-flex;
   align-items: center;
@@ -1226,35 +1238,53 @@ button:disabled {
   font-size: 0.78rem;
   line-height: 1.16;
   font-weight: 800;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .results-route-road {
   position: relative;
-  flex: 0 0 24px;
-  height: 20px;
+  flex: 0 0 42px;
+  height: 28px;
   display: grid;
   place-items: center;
   color: #fff;
 }
 
+.results-route-road.balanced {
+  flex-basis: 34px;
+}
+
+.results-route-road.compact {
+  flex-basis: 26px;
+}
+
+.results-route-road.roomy {
+  flex-basis: 42px;
+}
+
 .results-route-road::before {
   content: '';
   position: absolute;
-  left: 0;
-  right: 0;
-  top: 50%;
-  border-top: 2px dotted rgba(179, 164, 255, 0.52);
+  left: 1px;
+  right: 1px;
+  top: 20px;
+  height: 3px;
+  background-image: radial-gradient(circle, rgba(179, 164, 255, 0.58) 1.4px, transparent 1.6px);
+  background-size: 6px 3px;
+  background-repeat: repeat-x;
 }
 
 .results-route-road span {
   position: relative;
   z-index: 1;
-  width: 14px;
-  height: 14px;
+  transform: translateY(-7px);
+  width: 16px;
+  height: 16px;
   display: grid;
   place-items: center;
-  border-radius: 5px;
+  border-radius: 6px;
   background: var(--grad);
   box-shadow: 0 5px 10px rgba(124, 80, 255, 0.22);
 }
@@ -1300,6 +1330,14 @@ button:disabled {
   }
 
   .results-route-road {
+    flex-basis: 34px;
+  }
+
+  .results-route-road.balanced {
+    flex-basis: 28px;
+  }
+
+  .results-route-road.compact {
     flex-basis: 22px;
   }
 
@@ -3075,20 +3113,24 @@ button:disabled {
 .result-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  flex: 0 1 auto;
+  gap: clamp(5px, 1.6vw, 8px);
+  min-width: 0;
 }
 
 .alert-toggle {
   display: inline-flex;
   align-items: center;
+  flex: 1 1 auto;
   gap: 6px;
   border: 1px solid var(--line-2);
   background: var(--surface-2);
   color: #ddd8ef;
   border-radius: 999px;
-  padding: 7px 12px;
-  font-size: 0.82rem;
+  padding: 7px clamp(8px, 2.6vw, 12px);
+  font-size: clamp(0.76rem, 2.7vw, 0.82rem);
   font-weight: 600;
+  white-space: nowrap;
 }
 
 .alert-toggle.on {
@@ -3098,13 +3140,15 @@ button:disabled {
 }
 
 .result-new-search-top {
+  flex: 0 0 auto;
   border: 1px solid var(--line-2);
   background: var(--surface-2);
   color: #ddd8ef;
   border-radius: 999px;
-  padding: 7px 12px;
-  font-size: 0.82rem;
+  padding: 7px clamp(8px, 2.6vw, 12px);
+  font-size: clamp(0.76rem, 2.7vw, 0.82rem);
   font-weight: 600;
+  white-space: nowrap;
 }
 
 /* WhatsApp connect (pairing code) */
