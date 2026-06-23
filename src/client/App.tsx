@@ -400,6 +400,22 @@ function loadCardLocation(city?: string | null, country?: string | null, fallbac
   return cleanCity || cleanCountry || fallback;
 }
 
+function mapPinDestination(load: Load) {
+  const city = loadCardLocation(load.unloadCity, null, '');
+  const countryCode = countryCodeFromName(load.unloadCountry);
+  if (countryCode && city) return `${countryCode}, ${city}`;
+  return city || countryCode || load.unloadCountry?.trim() || null;
+}
+
+function escapeMapPinText(value: string) {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function initialSearchDraft(): SearchDraft {
   try {
     const saved = localStorage.getItem('loadhub:user-location');
@@ -561,6 +577,17 @@ function formatTime(value?: string | null) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return new Intl.DateTimeFormat('ro-RO', { hour: '2-digit', minute: '2-digit' }).format(date);
+}
+
+function formatRouteDistance(load: Load) {
+  const loadLat = Number(load.loadLat);
+  const loadLon = Number(load.loadLon);
+  const unloadLat = Number(load.unloadLat);
+  const unloadLon = Number(load.unloadLon);
+  if (![loadLat, loadLon, unloadLat, unloadLon].every(Number.isFinite)) return null;
+  const km = Math.round(distanceKm({ lat: loadLat, lng: loadLon }, { lat: unloadLat, lng: unloadLon }));
+  if (km < 1) return '< 1 km';
+  return `~ ${km.toLocaleString('ro-RO')} km`;
 }
 
 function languageLabel(value?: string | null) {
@@ -2837,10 +2864,16 @@ function MapScreen({ openLoad, goList, hasActiveSearch, searchLoads, onNewSearch
     if (!L || !container) return;
     const map = L.map(container, { zoomControl: false, attributionControl: true }).setView([45.9, 24.9], 6);
     map.attributionControl.setPrefix('');
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png', {
       subdomains: 'abcd',
       maxZoom: 19,
-      attribution: '&copy; OpenStreetMap &copy; CARTO'
+      attribution: '&copy; OpenStreetMap &copy; CARTO',
+      className: 'map-base-tiles'
+    }).addTo(map);
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}{r}.png', {
+      subdomains: 'abcd',
+      maxZoom: 19,
+      className: 'map-label-tiles'
     }).addTo(map);
     layerRef.current = L.layerGroup().addTo(map);
     mapRef.current = map;
@@ -2909,9 +2942,13 @@ function MapScreen({ openLoad, goList, hasActiveSearch, searchLoads, onNewSearch
       const [olat, olon] = spreadMarker(load.loadLat as number, load.loadLon as number, oIdx, originGroups.get(ok) || 1);
 
       const label = load.price ?? (load.weightTons ? `${load.weightTons}t` : '•');
+      const destination = mapPinDestination(load);
+      const destinationHtml = destination
+        ? `<span class="price-pin-destination">${escapeMapPinText(destination)}</span>`
+        : '';
       const icon = L.divIcon({
         className: 'price-pin-wrap',
-        html: `<span class="price-pin">${label}</span>`,
+        html: `<span class="price-pin"><span class="price-pin-value">${escapeMapPinText(label)}</span>${destinationHtml}</span>`,
         iconSize: [0, 0],
         iconAnchor: [0, 0]
       });
@@ -3155,6 +3192,7 @@ function DetailScreen({
   const contactLink = loadContactLink(load);
   const phoneDigits = (load.contact ?? '').replace(/\D/g, '');
   const phoneHref = phoneDigits.length >= 9 && phoneDigits.length <= 15 ? `tel:${(load.contact ?? '').replace(/[^\d+]/g, '')}` : null;
+  const routeDistance = formatRouteDistance(load);
   const isWhatsappSource = Boolean(contactLink && contactLink.includes('wa.me'));
   const sourceLabel = isWhatsappSource
     ? 'WhatsApp'
@@ -3186,6 +3224,11 @@ function DetailScreen({
             <strong>{load.loadCity || load.loadCountry || 'Incarcare'}</strong>
             <small>{[load.loadCountry, formatDate(load.loadDate)].filter(Boolean).join(' · ') || 'Incarcare'}</small>
           </div>
+          {routeDistance && (
+            <span className="route-distance" title="Distanta aproximativa in linie dreapta">
+              <MapPinned size={12} /> {routeDistance}
+            </span>
+          )}
           <div className="route-city">
             <strong>{load.unloadCity || load.unloadCountry || 'Descarcare'}</strong>
             <small>{load.unloadCountry || 'Descarcare'}</small>
