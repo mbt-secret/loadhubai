@@ -1,4 +1,5 @@
 import {
+  ArrowLeft,
   Bell,
   BellOff,
   Bot,
@@ -30,7 +31,6 @@ import {
   Settings,
   ShieldCheck,
   SlidersHorizontal,
-  Sparkles,
   Target,
   Trash2,
   Truck,
@@ -241,6 +241,20 @@ function distanceKm(from: { lat: number; lng: number }, to: { lat: number; lng: 
   return 2 * earthKm * Math.asin(Math.sqrt(a));
 }
 
+function spreadMarker(lat: number, lon: number, index: number, total: number): [number, number] {
+  if (total <= 1) return [lat, lon];
+  const base = 0.01; // ~1.1 km
+  const perRing = 8;
+  const ring = Math.floor(index / perRing);
+  const inRing = index % perRing;
+  const countInRing = Math.min(perRing, total - ring * perRing);
+  const radius = base * (ring + 1);
+  const angle = (inRing / Math.max(countInRing, 1)) * 2 * Math.PI;
+  const dLat = radius * Math.cos(angle);
+  const dLon = (radius * Math.sin(angle)) / Math.cos((lat * Math.PI) / 180);
+  return [lat + dLat, lon + dLon];
+}
+
 function originFromGps(lat: number, lng: number) {
   const current = { lat, lng };
   const nearest = originOptions
@@ -257,6 +271,18 @@ function originFromGps(lat: number, lng: number) {
   return {
     label: `${lat.toFixed(4)}, ${lng.toFixed(4)}`,
     note: 'GPS detectat. Nu am gasit un oras apropiat in lista locala, folosim coordonatele.'
+  };
+}
+
+function countryOnlyFromGps(lat: number, lng: number) {
+  const current = { lat, lng };
+  const nearest = originOptions
+    .map((option) => ({ ...option, distance: distanceKm(current, option) }))
+    .sort((a, b) => a.distance - b.distance)[0];
+  const country = nearest?.label.split(',').pop()?.trim() || defaultSearchDraft.origin.split(',').pop()?.trim() || defaultSearchDraft.origin;
+  return {
+    label: country,
+    note: `GPS detectat. Folosim doar tara: ${country}.`
   };
 }
 
@@ -649,6 +675,7 @@ function writeSavedOffers(offers: Load[]) {
 
 function App() {
   const [view, setView] = useState<View>('home');
+  const [detailReturnView, setDetailReturnView] = useState<View>('results');
   const [status, setStatus] = useState<WhatsappStatus>(emptyStatus);
   const [groups, setGroups] = useState<Group[]>([]);
   const [loads, setLoads] = useState<Load[]>([]);
@@ -989,6 +1016,7 @@ function App() {
   }
 
   async function openLoad(load: Load) {
+    setDetailReturnView(view === 'detail' ? detailReturnView : view);
     await run(async () => {
       setSelectedLoad(await api.load(load.id));
       setView('detail');
@@ -1182,13 +1210,15 @@ function App() {
               hasActiveSearch={hasActiveSearch}
               searchLoads={loads}
               onNewSearch={startNewSearch}
+              searchDraft={searchDraft}
+              alertLoads={notifications}
             />
           )}
           {view === 'detail' && selectedLoad && (
             <DetailScreen
               load={selectedLoad}
               loading={loading}
-              onBack={() => setView('results')}
+              onBack={() => setView(detailReturnView)}
               isSaved={savedOffers.some((item) => item.id === selectedLoad.id)}
               onToggleSave={() => toggleSavedOffer(selectedLoad)}
               onAnalyze={() => analyzeLoad(selectedLoad)}
@@ -1705,7 +1735,13 @@ function SearchScreen({
   const activeFilters = countActiveSearchFilters(draft);
   const [gpsBusy, setGpsBusy] = useState(false);
   const [gpsError, setGpsError] = useState<string | null>(null);
-  const detectGps = () => {
+  const toggleGps = () => {
+    if (gpsBusy) return;
+    if (draft.originSource === 'gps') {
+      setGpsError(null);
+      setDraft({ ...draft, originSource: 'manual' });
+      return;
+    }
     if (!navigator.geolocation) {
       setGpsError('GPS indisponibil. Scrie locația manual.');
       return;
@@ -1714,7 +1750,7 @@ function SearchScreen({
     setGpsBusy(true);
     navigator.geolocation.getCurrentPosition(
       (position) => {
-        const detected = originFromGps(position.coords.latitude, position.coords.longitude);
+        const detected = countryOnlyFromGps(position.coords.latitude, position.coords.longitude);
         setDraft({ ...draft, origin: detected.label, originSource: 'gps' });
         setGpsBusy(false);
       },
@@ -1751,7 +1787,7 @@ function SearchScreen({
           tabIndex={0}
           onClick={(event) => {
             event.stopPropagation();
-            detectGps();
+            toggleGps();
           }}
         >
           <Target size={13} /> {gpsBusy ? 'Caut...' : 'GPS'}
@@ -1890,7 +1926,7 @@ function FilterSheet({
           </div>
 
           <div className="sech-row">
-            <b>Vechime mesaj</b>
+            <b>Vechime Oferta</b>
           </div>
           <div className="feed-chips wrap">
             {ageChips.map((age) => (
@@ -1931,6 +1967,13 @@ function OriginScreen({
   }
 
   function detectGps() {
+    if (detecting) return;
+    if (draft.originSource === 'gps') {
+      setManualOrigin(draft.origin);
+      setDraft({ ...draft, originSource: 'manual' });
+      setGpsStatus('GPS dezactivat. Folosim tara ca locatie manuala.');
+      return;
+    }
     if (!navigator.geolocation) {
       setGpsStatus('Browserul nu ofera acces la GPS. Scrie locatia manual.');
       return;
@@ -1940,7 +1983,7 @@ function OriginScreen({
     setGpsStatus('Cautam pozitia GPS...');
     navigator.geolocation.getCurrentPosition(
       (position) => {
-        const detected = originFromGps(position.coords.latitude, position.coords.longitude);
+        const detected = countryOnlyFromGps(position.coords.latitude, position.coords.longitude);
         setManualOrigin(detected.label);
         setDraft({ ...draft, origin: detected.label, originSource: 'gps' });
         setGpsStatus(detected.note);
@@ -2339,7 +2382,7 @@ function FilterRows({
     { key: 'cargoType', label: 'Tip marfa', options: ['Orice', 'Generala', 'Frigorifica', 'ADR'] },
     { key: 'price', label: 'Pret (EUR)', options: ['Orice', 'Min 1000', 'Min 2000', 'Min 2500'] },
     { key: 'loadDate', label: 'Data incarcarii', options: ['Oricand', 'Azi', 'Maine', 'Saptamana aceasta'] },
-    { key: 'messageAge', label: 'Vechime mesaj', options: ['Oricand', ...messageAgeOptions.keys()] }
+    { key: 'messageAge', label: 'Vechime Oferta', options: ['Oricand', ...messageAgeOptions.keys()] }
   ];
 
   return (
@@ -2690,7 +2733,7 @@ function LoadCard({ load, onClick }: { load: Load; onClick: () => void }) {
   );
 }
 
-function MapScreen({ openLoad, goList, hasActiveSearch, searchLoads, onNewSearch }: { openLoad: (load: Load) => void; goList: () => void; hasActiveSearch: boolean; searchLoads: Load[]; onNewSearch: () => void }) {
+function MapScreen({ openLoad, goList, hasActiveSearch, searchLoads, onNewSearch, searchDraft, alertLoads }: { openLoad: (load: Load) => void; goList: () => void; hasActiveSearch: boolean; searchLoads: Load[]; onNewSearch: () => void; searchDraft: SearchDraft; alertLoads: Load[] }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<any>(null);
   const layerRef = useRef<any>(null);
@@ -2704,15 +2747,16 @@ function MapScreen({ openLoad, goList, hasActiveSearch, searchLoads, onNewSearch
   const [fetching, setFetching] = useState(true);
   const [geoCenter, setGeoCenter] = useState<{ lat: number; lng: number } | null>(null);
   const [zoneOnly, setZoneOnly] = useState(true);
+  const [alertActive, setAlertActive] = useState(false);
   const [showFilters, setShowFilters] = useState(false);
   const [priceOnly, setPriceOnly] = usePersistentState('loadhub.map.priceOnly', false);
-  const [intlOnly, setIntlOnly] = usePersistentState('loadhub.map.intlOnly', false);
   const [truck, setTruck] = usePersistentState('loadhub.map.truck', 'Orice');
   const [age, setAge] = usePersistentState('loadhub.map.age', 'Oricand');
   const [priceMin, setPriceMin] = usePersistentState('loadhub.map.priceMin', '');
   const [priceMax, setPriceMax] = usePersistentState('loadhub.map.priceMax', '');
   const [tonMin, setTonMin] = usePersistentState('loadhub.map.tonMin', '');
   const [tonMax, setTonMax] = usePersistentState('loadhub.map.tonMax', '');
+  const [radiusKm, setRadiusKm] = usePersistentState('loadhub.map.zoneRadius', 300);
 
   useEffect(() => {
     if (hasActiveSearch) {
@@ -2749,15 +2793,23 @@ function MapScreen({ openLoad, goList, hasActiveSearch, searchLoads, onNewSearch
     { label: '5 ore', value: 'Ultimele 5 ore' },
     { label: '24 ore', value: 'Ultima zi' }
   ];
+  const distanceChips = [
+    { label: '20 km', value: 20 },
+    { label: '100 km', value: 100 },
+    { label: '300 km', value: 300 },
+    { label: '500 km', value: 500 },
+    { label: 'Fără', value: 0 }
+  ];
 
-  const sourceLoads = hasActiveSearch ? searchLoads : allLoads;
+  const sourceLoads = hasActiveSearch ? searchLoads : alertActive ? alertLoads : allLoads;
   const filtered = useMemo(
     () =>
       sourceLoads.filter((load) => {
         if (typeof load.loadLat !== 'number' || typeof load.loadLon !== 'number') return false;
-        if (!hasActiveSearch && zoneOnly && geoCenter && distanceKm(geoCenter, { lat: load.loadLat, lng: load.loadLon }) > 400) return false;
+        if (!hasActiveSearch && !alertActive && zoneOnly && geoCenter && radiusKm > 0) {
+          if (distanceKm(geoCenter, { lat: load.loadLat, lng: load.loadLon }) > radiusKm) return false;
+        }
         if (priceOnly && !hasIncludedPrice(load)) return false;
-        if (intlOnly && !(load.loadCountry && load.unloadCountry && load.loadCountry !== load.unloadCountry)) return false;
         if (truck !== 'Orice' && !(load.truckType ?? '').toLowerCase().includes(truck.toLowerCase().slice(0, 4))) return false;
         const pv = priceValue(load);
         if (priceMin && (pv === null || pv < Number(priceMin))) return false;
@@ -2771,10 +2823,10 @@ function MapScreen({ openLoad, goList, hasActiveSearch, searchLoads, onNewSearch
         }
         return true;
       }),
-    [sourceLoads, hasActiveSearch, zoneOnly, geoCenter, priceOnly, intlOnly, truck, age, priceMin, priceMax, tonMin, tonMax]
+    [sourceLoads, hasActiveSearch, alertActive, zoneOnly, geoCenter, priceOnly, truck, age, priceMin, priceMax, tonMin, tonMax, radiusKm]
   );
 
-  const activeCount = [priceOnly, intlOnly, truck !== 'Orice', age !== 'Oricand', Boolean(priceMin), Boolean(priceMax), Boolean(tonMin), Boolean(tonMax)].filter(
+  const activeCount = [priceOnly, truck !== 'Orice', age !== 'Oricand', Boolean(priceMin), Boolean(priceMax), Boolean(tonMin), Boolean(tonMax)].filter(
     Boolean
   ).length;
   const zoneActive = !hasActiveSearch && zoneOnly && Boolean(geoCenter);
@@ -2817,7 +2869,45 @@ function MapScreen({ openLoad, goList, hasActiveSearch, searchLoads, onNewSearch
     const layer = layerRef.current;
     if (!L || !layer) return;
     layer.clearLayers();
+
+    if (geoCenter) {
+      const meIcon = L.divIcon({
+        className: 'me-pin-wrap',
+        html:
+          '<span class="me-pin">' +
+          '<span class="me-pulse"></span>' +
+          '<span class="me-dot"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">' +
+          '<path d="M14 18V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v11a1 1 0 0 0 1 1h2"/>' +
+          '<path d="M15 18H9"/>' +
+          '<path d="M19 18h2a1 1 0 0 0 1-1v-3.65a1 1 0 0 0-.22-.624l-3.48-4.35A1 1 0 0 0 17.52 8H14"/>' +
+          '<circle cx="7" cy="18" r="2"/><circle cx="17" cy="18" r="2"/></svg></span>' +
+          '</span>',
+        iconSize: [0, 0],
+        iconAnchor: [0, 0]
+      });
+      L.marker([geoCenter.lat, geoCenter.lng], { icon: meIcon, interactive: false, zIndexOffset: 1000 }).addTo(layer);
+    }
+
+    const coordKey = (lat: number, lon: number) => `${lat.toFixed(3)},${lon.toFixed(3)}`;
+    const originGroups = new Map<string, number>();
+    const destGroups = new Map<string, number>();
     filtered.forEach((load) => {
+      const ok = coordKey(load.loadLat as number, load.loadLon as number);
+      originGroups.set(ok, (originGroups.get(ok) || 0) + 1);
+      if (hasActiveSearch && typeof load.unloadLat === 'number' && typeof load.unloadLon === 'number') {
+        const dk = coordKey(load.unloadLat, load.unloadLon);
+        destGroups.set(dk, (destGroups.get(dk) || 0) + 1);
+      }
+    });
+    const originSeen = new Map<string, number>();
+    const destSeen = new Map<string, number>();
+
+    filtered.forEach((load) => {
+      const ok = coordKey(load.loadLat as number, load.loadLon as number);
+      const oIdx = originSeen.get(ok) || 0;
+      originSeen.set(ok, oIdx + 1);
+      const [olat, olon] = spreadMarker(load.loadLat as number, load.loadLon as number, oIdx, originGroups.get(ok) || 1);
+
       const label = load.price ?? (load.weightTons ? `${load.weightTons}t` : '•');
       const icon = L.divIcon({
         className: 'price-pin-wrap',
@@ -2825,10 +2915,25 @@ function MapScreen({ openLoad, goList, hasActiveSearch, searchLoads, onNewSearch
         iconSize: [0, 0],
         iconAnchor: [0, 0]
       });
-      const marker = L.marker([load.loadLat as number, load.loadLon as number], { icon }).addTo(layer);
+      const marker = L.marker([olat, olon], { icon }).addTo(layer);
       marker.on('click', () => openRef.current(load));
+
+      if (hasActiveSearch && typeof load.unloadLat === 'number' && typeof load.unloadLon === 'number') {
+        const dk = coordKey(load.unloadLat, load.unloadLon);
+        const dIdx = destSeen.get(dk) || 0;
+        destSeen.set(dk, dIdx + 1);
+        const [dlat, dlon] = spreadMarker(load.unloadLat, load.unloadLon, dIdx, destGroups.get(dk) || 1);
+        const destIcon = L.divIcon({
+          className: 'dest-pin-wrap',
+          html: '<span class="dest-pin"></span>',
+          iconSize: [0, 0],
+          iconAnchor: [0, 0]
+        });
+        const destMarker = L.marker([dlat, dlon], { icon: destIcon }).addTo(layer);
+        destMarker.on('click', () => openRef.current(load));
+      }
     });
-  }, [filtered]);
+  }, [filtered, hasActiveSearch, geoCenter]);
 
   useEffect(() => {
     if (hasActiveSearch || zoneOnly) return;
@@ -2863,6 +2968,7 @@ function MapScreen({ openLoad, goList, hasActiveSearch, searchLoads, onNewSearch
       setZoneOnly(false);
       return;
     }
+    setAlertActive(false);
     if (geoCenter) {
       setZoneOnly(true);
       if (mapRef.current) mapRef.current.setView([geoCenter.lat, geoCenter.lng], 7);
@@ -2871,38 +2977,83 @@ function MapScreen({ openLoad, goList, hasActiveSearch, searchLoads, onNewSearch
     }
   };
 
+  const toggleAlertMap = () => {
+    if (alertActive) {
+      setAlertActive(false);
+      return;
+    }
+    setAlertActive(true);
+    setZoneOnly(false);
+    zonePreferenceTouchedRef.current = true;
+  };
+
   const resetFilters = () => {
     setPriceOnly(false);
-    setIntlOnly(false);
     setTruck('Orice');
     setAge('Oricand');
     setPriceMin('');
     setPriceMax('');
     setTonMin('');
     setTonMax('');
+    setRadiusKm(300);
   };
+
+  const routeFrom = searchDraft.origin.split(',')[0].trim() || 'Oriunde';
+  const routeTo = searchDraft.destinationType === 'all' ? 'Oriunde' : (searchDraft.destination.split(',')[0].trim() || 'Oriunde');
 
   return (
     <section className="map-screen">
       <div className="map-leaflet-wrap full">
         <div className="map-leaflet" ref={containerRef} />
-        <div className="map-topbar">
-          <button className="map-chip-btn" onClick={onNewSearch} title="Cautare noua">
-            <Search size={15} /> Caută
-          </button>
-          {!hasActiveSearch && (
-            <button className={`map-chip-btn ${zoneActive ? 'on' : ''}`} onClick={toggleZone} title="Zona mea (GPS) - apasa pentru on/off">
-              <Navigation size={15} /> Zona mea
-            </button>
-          )}
-          <button
-            className={`map-chip-btn ${showFilters || activeCount > 0 ? 'on' : ''}`}
-            onClick={() => setShowFilters((value) => !value)}
-          >
-            <SlidersHorizontal size={15} /> Filtre{activeCount > 0 ? ` · ${activeCount}` : ''}
-          </button>
-          <span className="map-count">{fetching ? 'Se încarcă…' : `${filtered.length} curse`}</span>
-        </div>
+        {hasActiveSearch ? (
+          <div className="map-topbar map-topbar-search">
+            <div className="map-search-line">
+              <button className="map-back-btn" onClick={goList} title="Inapoi la rezultate">
+                <ArrowLeft size={18} />
+              </button>
+              <div className="map-route">
+                <span>{routeFrom}</span>
+                <span className="map-route-arrow">→</span>
+                <span>{routeTo}</span>
+              </div>
+              <button className="map-chip-btn" onClick={onNewSearch} title="Cautare noua">
+                <Search size={14} /> Caută nou
+              </button>
+            </div>
+            <div className="map-search-line">
+              <button
+                className={`map-chip-btn ${showFilters || activeCount > 0 ? 'on' : ''}`}
+                onClick={() => setShowFilters((value) => !value)}
+              >
+                <SlidersHorizontal size={15} /> Filtre{activeCount > 0 ? ` · ${activeCount}` : ''}
+              </button>
+              <span className="map-count">{fetching ? 'Se încarcă…' : `${filtered.length} curse`}</span>
+            </div>
+          </div>
+        ) : (
+          <div className="map-topbar map-topbar-search">
+            <div className="map-search-line map-chip-row">
+              <button className="map-chip-btn" onClick={onNewSearch} title="Cauta o cursa noua">
+                <Search size={14} /> Caută Cursă
+              </button>
+              <button className={`map-chip-btn ${zoneActive ? 'on' : ''}`} onClick={toggleZone} title="Zona mea (GPS) - on/off">
+                <Navigation size={14} /> Zona mea
+              </button>
+              <button className={`map-chip-btn ${alertActive ? 'on' : ''}`} onClick={toggleAlertMap} title="Curse din alerte - on/off">
+                <Bell size={14} /> Alerte
+              </button>
+            </div>
+            <div className="map-search-line">
+              <button
+                className={`map-chip-btn ${showFilters || activeCount > 0 ? 'on' : ''}`}
+                onClick={() => setShowFilters((value) => !value)}
+              >
+                <SlidersHorizontal size={15} /> Filtre{activeCount > 0 ? ` · ${activeCount}` : ''}
+              </button>
+              <span className="map-count">{fetching ? 'Se încarcă…' : `${filtered.length} curse`}</span>
+            </div>
+          </div>
+        )}
         {showFilters && (
           <div className="map-filter-panel">
             <div className="sheet-head">
@@ -2918,13 +3069,16 @@ function MapScreen({ openLoad, goList, hasActiveSearch, searchLoads, onNewSearch
                 <span />
               </span>
             </label>
-            <label className="map-toggle-row">
-              <span>Doar internațional</span>
-              <span className="switch">
-                <input type="checkbox" checked={intlOnly} onChange={() => setIntlOnly((value) => !value)} />
-                <span />
-              </span>
-            </label>
+            <div className="sech-row">
+              <b>Distanță față de Zona mea</b>
+            </div>
+            <div className="feed-chips">
+              {distanceChips.map((item) => (
+                <button key={item.value} className={radiusKm === item.value ? 'active' : ''} onClick={() => setRadiusKm(item.value)}>
+                  {item.label}
+                </button>
+              ))}
+            </div>
             <div className="sech-row">
               <b>Preț (€)</b>
             </div>
@@ -2942,9 +3096,9 @@ function MapScreen({ openLoad, goList, hasActiveSearch, searchLoads, onNewSearch
               <input type="number" inputMode="numeric" placeholder="până la" value={tonMax} onChange={(event) => setTonMax(event.target.value)} />
             </div>
             <div className="sech-row">
-              <b>Vechime mesaj</b>
+              <b>Vechime Oferta</b>
             </div>
-            <div className="feed-chips wrap">
+            <div className="feed-chips">
               {ageChips.map((item) => (
                 <button key={item.value} className={age === item.value ? 'active' : ''} onClick={() => setAge(item.value)}>
                   {item.label}
@@ -2954,7 +3108,7 @@ function MapScreen({ openLoad, goList, hasActiveSearch, searchLoads, onNewSearch
             <div className="sech-row">
               <b>Tip camion</b>
             </div>
-            <div className="feed-chips wrap">
+            <div className="feed-chips">
               {truckTypes.map((item) => (
                 <button key={item} className={truck === item ? 'active' : ''} onClick={() => setTruck(item)}>
                   {item}
@@ -2991,6 +3145,13 @@ function DetailScreen({
 }) {
   const translatedText =
     load.translatedText && load.translatedText.trim() !== load.originalText.trim() ? load.translatedText.trim() : null;
+  const [showAi, setShowAi] = useState(false);
+  const hasAi = Boolean(load.aiSummary) || Boolean(translatedText);
+  const toggleAi = () => {
+    const next = !showAi;
+    setShowAi(next);
+    if (next && !hasAi && !loading) onAnalyze();
+  };
   const contactLink = loadContactLink(load);
   const phoneDigits = (load.contact ?? '').replace(/\D/g, '');
   const phoneHref = phoneDigits.length >= 9 && phoneDigits.length <= 15 ? `tel:${(load.contact ?? '').replace(/[^\d+]/g, '')}` : null;
@@ -3053,27 +3214,28 @@ function DetailScreen({
           <span className="v">{load.contact ?? 'n/a'}</span>
         </div>
       </div>
-      <div className="ai-panel">
-        <div className="panel-title">
-          <Bot size={18} />
-          <strong>Analiza AI</strong>
-          <span>{languageLabel(load.detectedLanguage)} {'->'} RO</span>
-        </div>
-        <p>{load.aiSummary ?? 'Apasa pentru analiza si traducere.'}</p>
-        {translatedText && (
-          <div className="translation-box">
-            <strong>Traducere in romana</strong>
-            <blockquote>{translatedText}</blockquote>
-          </div>
-        )}
-        <button className="secondary-button wide" onClick={onAnalyze} disabled={loading}>
-          <Sparkles size={17} />
-          Analizeaza si traduce
-        </button>
-      </div>
       <div className="message-box">
-        <strong>Mesaj original</strong>
-        <p>{load.originalText}</p>
+        <div className="message-box-head">
+          <strong>{showAi ? 'Analiză AI și traducere' : 'Mesaj original'}</strong>
+          <button className={`ai-toggle-btn${showAi ? ' on' : ''}`} onClick={toggleAi} disabled={loading}>
+            <Bot size={15} /> Analizează AI și traducere
+          </button>
+        </div>
+        {showAi ? (
+          loading && !hasAi ? (
+            <p className="msg-muted">Se analizează și se traduce…</p>
+          ) : hasAi ? (
+            <>
+              {load.aiSummary && <p>{load.aiSummary}</p>}
+              {translatedText && <blockquote>{translatedText}</blockquote>}
+              <span className="msg-lang">{languageLabel(load.detectedLanguage)} {'->'} RO</span>
+            </>
+          ) : (
+            <p className="msg-muted">Nu există analiză pentru această ofertă.</p>
+          )
+        ) : (
+          <p>{load.originalText}</p>
+        )}
       </div>
       <div className="detail-source">
         <Users size={15} />

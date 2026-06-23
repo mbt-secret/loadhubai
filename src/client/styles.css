@@ -294,6 +294,7 @@ button:disabled {
   font-weight: 600;
   color: var(--muted);
   background: var(--surface-3);
+  border: 0;
   padding: 6px 11px;
   border-radius: 999px;
 }
@@ -1823,6 +1824,51 @@ button:disabled {
   cursor: pointer;
 }
 
+/* Marker pozitie GPS - tu esti aici (camion albastru, cerc care pulseaza usor) */
+.me-pin-wrap {
+  width: 0 !important;
+  height: 0 !important;
+}
+
+.me-pin {
+  position: relative;
+  display: block;
+  width: 24px;
+  height: 24px;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.me-dot {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: #fff;
+  border: 2.5px solid #1a73e8;
+  color: #1a73e8;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+}
+
+.me-pulse {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border-radius: 50%;
+  background: rgba(26, 115, 232, 0.35);
+  border: 1px solid rgba(26, 115, 232, 0.5);
+  transform-origin: center;
+  animation: me-heartbeat 1.6s ease-out infinite;
+}
+
+@keyframes me-heartbeat {
+  0% { transform: scale(1); opacity: 0.7; }
+  70% { transform: scale(2.9); opacity: 0; }
+  100% { transform: scale(2.9); opacity: 0; }
+}
+
 .leaflet-control-attribution {
   background: rgba(11, 10, 18, 0.7) !important;
   color: #6f6a86 !important;
@@ -1859,6 +1905,7 @@ button:disabled {
   padding: 8px 13px;
   font-size: 0.82rem;
   font-weight: 600;
+  white-space: nowrap;
 }
 
 .map-chip-btn.on {
@@ -1890,6 +1937,24 @@ button:disabled {
   max-height: calc(100% - 76px);
   overflow-y: auto;
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+}
+
+.map-filter-panel .sech-row {
+  margin: 12px 2px 6px;
+}
+
+.map-filter-panel .feed-chips {
+  gap: 6px;
+  padding: 6px 0 2px;
+}
+
+.map-filter-panel .feed-chips button {
+  padding: 6px 10px;
+  font-size: 0.76rem;
+}
+
+.map-filter-panel .primary-button {
+  margin-top: 12px;
 }
 
 .map-toggle-row {
@@ -2076,6 +2141,64 @@ button:disabled {
   font-size: 0.84rem;
   line-height: 1.5;
   color: #cfc8e8;
+}
+
+.message-box-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.ai-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--line-2);
+  background: rgba(13, 12, 22, 0.6);
+  color: #cfc8e8;
+  font-size: 0.74rem;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.ai-toggle-btn.on {
+  border-color: var(--violet);
+  color: #fff;
+  background: var(--grad);
+}
+
+.ai-toggle-btn:disabled {
+  opacity: 0.6;
+}
+
+.message-box blockquote {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  background: rgba(0, 0, 0, 0.22);
+  border-radius: 12px;
+  font-size: 0.84rem;
+  line-height: 1.5;
+  color: #ddd8ef;
+}
+
+.msg-muted {
+  margin: 8px 0 0;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.msg-lang {
+  display: inline-block;
+  margin-top: 10px;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--violet-soft);
 }
 
 .edit-grid {
@@ -3288,4 +3411,37 @@ button:disabled {
   font-weight: 600;
   color: rgba(255, 255, 255, 0.72);
   text-align: center;
+}
+
+/* Map header cand e cautare activa */
+.map-topbar-search { flex-direction: column; align-items: stretch; gap: 8px; }
+.map-search-line { display: flex; align-items: center; gap: 8px; }
+.map-search-line.map-chip-row { gap: 6px; flex-wrap: nowrap; }
+.map-chip-row .map-chip-btn { flex: 1 1 0; min-width: 0; justify-content: center; padding: 7px 6px; font-size: 0.74rem; gap: 5px; }
+.map-chip-row .map-chip-btn svg { flex: 0 0 auto; }
+.map-back-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 34px; height: 34px; flex: 0 0 auto;
+  border-radius: 10px; border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.06); color: inherit; cursor: pointer;
+}
+.map-route {
+  flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 6px;
+  font-size: 13px; font-weight: 700; white-space: nowrap; overflow: hidden;
+  padding: 7px 10px; border-radius: 10px;
+  background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.1);
+}
+.map-route > span { overflow: hidden; text-overflow: ellipsis; }
+.map-route-arrow { color: #b9a8ff; flex: 0 0 auto; font-weight: 400; }
+
+
+/* Punct destinatie pe harta (cautare activa) */
+.dest-pin {
+  display: block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #36d77f;
+  border: 2px solid #0a0910;
+  box-shadow: 0 0 0 2px rgba(54, 215, 127, 0.45);
 }
