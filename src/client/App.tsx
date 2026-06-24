@@ -216,6 +216,49 @@ const COUNTRY_CODE_BY_NAME = new Map<string, string>(
   ].map(([name, code]) => [normalizeCountryName(name), code])
 );
 
+type MultiRoute = { from: string; to: string };
+type MultiPreset = { id: string; name: string; routes: MultiRoute[] };
+
+// Tari pentru cautarea multipla (nume RO compatibile cu backend-ul), in ordinea relevantei.
+const MULTI_COUNTRY_NAMES = [
+  'Romania', 'Moldova', 'Turcia', 'Ungaria', 'Bulgaria', 'Germania', 'Italia',
+  'Austria', 'Franta', 'Spania', 'Olanda', 'Belgia', 'Polonia', 'Cehia',
+  'Slovacia', 'Slovenia', 'Croatia', 'Serbia', 'Grecia', 'Ucraina',
+  'Regatul Unit', 'Elvetia', 'Suedia', 'Danemarca', 'Portugalia',
+  'Lituania', 'Letonia', 'Estonia'
+];
+
+function countryCode(name: string): string {
+  return COUNTRY_CODE_BY_NAME.get(normalizeCountryName(name)) ?? name.slice(0, 2).toUpperCase();
+}
+
+function multiRouteLabel(route: MultiRoute): string {
+  return `${countryCode(route.from)}→${countryCode(route.to)}`;
+}
+
+function routesSummary(routes: MultiRoute[]): string {
+  return routes.map(multiRouteLabel).join(' · ');
+}
+
+const MULTI_PRESETS_KEY = 'loadhub.multiPresets';
+
+function readMultiPresets(): MultiPreset[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(MULTI_PRESETS_KEY) ?? '[]');
+    return Array.isArray(raw) ? raw : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeMultiPresets(list: MultiPreset[]) {
+  try {
+    localStorage.setItem(MULTI_PRESETS_KEY, JSON.stringify(list));
+  } catch {
+    // ignore storage errors
+  }
+}
+
 const originOptions = [
   { label: 'Arad, Romania', code: 'AR', lat: 46.1866, lng: 21.3123 },
   { label: 'Timisoara, Romania', code: 'TM', lat: 45.7489, lng: 21.2087 },
@@ -715,6 +758,10 @@ function App() {
   const [query, setQuery] = usePersistentState('loadhub.search.query', '', 7200000);
   const [searchDraft, setSearchDraft] = usePersistentState<SearchDraft>('loadhub.search.draft', initialSearchDraft(), 7200000);
   const [hasActiveSearch, setHasActiveSearch] = usePersistentState('loadhub.search.active', false, 7200000);
+  const [searchMode, setSearchMode] = usePersistentState<'single' | 'multi'>('loadhub.search.mode', 'single', 7200000);
+  const [multiRoutes, setMultiRoutes] = usePersistentState<MultiRoute[]>('loadhub.search.multiRoutes', [], 7200000);
+  const [multiActive, setMultiActive] = usePersistentState('loadhub.search.multiActive', false, 7200000);
+  const [multiPresets, setMultiPresets] = useState<MultiPreset[]>(() => readMultiPresets());
   const [priceOnlyResults, setPriceOnlyResults] = useState(false);
   const [groupFilter, setGroupFilter] = useState('');
   const [loading, setLoading] = useState(false);
@@ -857,9 +904,56 @@ function App() {
 
   function startNewSearch() {
     setHasActiveSearch(false);
+    setMultiActive(false);
     setQuery('');
     setSearchDraft(initialSearchDraft());
     setView('search');
+  }
+
+  function deleteMultiPreset(id: string) {
+    setMultiPresets((current) => {
+      const next = current.filter((preset) => preset.id !== id);
+      writeMultiPresets(next);
+      return next;
+    });
+  }
+
+  function saveMultiPreset(name: string, routes: MultiRoute[], editingId?: string | null) {
+    const cleanName = name.trim();
+    if (!cleanName || routes.length === 0) return;
+    setMultiPresets((current) => {
+      const next = editingId
+        ? current.map((item) => (item.id === editingId ? { ...item, name: cleanName, routes } : item))
+        : [{ id: String(Date.now()), name: cleanName, routes }, ...current.filter((item) => item.name !== cleanName)];
+      writeMultiPresets(next);
+      return next;
+    });
+    // Seturile NU devin alerte; apar doar in Cont -> Cautari Salvate (tab Cautari & Seturi).
+  }
+
+  async function runMultiSearch(routes: MultiRoute[]) {
+    if (!routes || routes.length === 0) return;
+    await run(async () => {
+      setPriceOnlyResults(false);
+      setView('searching');
+      await new Promise((resolve) => setTimeout(resolve, 900));
+      const byId = new Map<number, Load>();
+      for (const route of routes) {
+        const params: LoadSearchParams = { origin: route.from, destination: route.to, destinationType: 'country' };
+        const routeLoads = await api.loads(`din ${route.from} catre ${route.to}`, params);
+        for (const load of routeLoads) byId.set(load.id, load);
+      }
+      const merged = Array.from(byId.values()).sort(
+        (a, b) => new Date(b.messageTime ?? b.capturedAt).getTime() - new Date(a.messageTime ?? a.capturedAt).getTime()
+      );
+      setLoads(merged);
+      setMultiRoutes(routes);
+      setQuery(routesSummary(routes));
+      setSearchDraft(initialSearchDraft());
+      setMultiActive(true);
+      setHasActiveSearch(true);
+      setView('results');
+    });
   }
 
   function editCurrentSearch() {
@@ -1166,6 +1260,12 @@ function App() {
                 setFilterSheetContext('search');
                 setFiltersOpen(true);
               }}
+              searchMode={searchMode}
+              setSearchMode={setSearchMode}
+              multiPresets={multiPresets}
+              saveMultiPreset={saveMultiPreset}
+              deleteMultiPreset={deleteMultiPreset}
+              onRunMulti={runMultiSearch}
             />
           )}
           {view === 'origin' && (
@@ -1224,6 +1324,8 @@ function App() {
               onNewSearch={startNewSearch}
               onEditSearch={editCurrentSearch}
               resultFilters={searchDraft}
+              multiActive={multiActive}
+              multiRoutes={multiRoutes}
               openFilters={() => {
                 setFilterSheetContext('results');
                 setFiltersOpen(true);
@@ -1239,6 +1341,8 @@ function App() {
               onNewSearch={startNewSearch}
               searchDraft={searchDraft}
               alertLoads={notifications}
+              multiActive={multiActive}
+              multiRoutes={multiRoutes}
             />
           )}
           {view === 'detail' && selectedLoad && (
@@ -1307,7 +1411,24 @@ function App() {
             />
           )}
           {view === 'savedOffers' && (
-            <SavedOffersScreen savedOffers={savedOffers} openLoad={openLoad} onBack={() => setView('settings')} />
+            <SavedOffersScreen
+              savedOffers={savedOffers}
+              openLoad={openLoad}
+              onBack={() => setView('settings')}
+              savedSearches={savedSearches}
+              multiPresets={multiPresets}
+              performSearch={performSearch}
+              onDeleteSearch={async (search) => {
+                await run(async () => {
+                  await api.deleteSearch(search.id);
+                  const [nextSearches, nextAlertMatches] = await Promise.all([api.searches(), api.alertMatches()]);
+                  setSavedSearches(nextSearches);
+                  setNotifications(nextAlertMatches);
+                });
+              }}
+              onRunPreset={(preset) => runMultiSearch(preset.routes)}
+              onDeletePreset={deleteMultiPreset}
+            />
           )}
           {view === 'settings' && (
             <SettingsScreen
@@ -1743,7 +1864,13 @@ function SearchScreen({
   openRadius,
   openConfirm,
   onRun,
-  openFilters
+  openFilters,
+  searchMode,
+  setSearchMode,
+  multiPresets,
+  saveMultiPreset,
+  deleteMultiPreset,
+  onRunMulti
 }: {
   query: string;
   setQuery: (value: string) => void;
@@ -1758,8 +1885,28 @@ function SearchScreen({
   openConfirm: () => void;
   onRun: () => void;
   openFilters: () => void;
+  searchMode: 'single' | 'multi';
+  setSearchMode: (mode: 'single' | 'multi') => void;
+  multiPresets: MultiPreset[];
+  saveMultiPreset: (name: string, routes: MultiRoute[], editingId?: string | null) => void;
+  deleteMultiPreset: (id: string) => void;
+  onRunMulti: (routes: MultiRoute[]) => void;
 }) {
   const activeFilters = countActiveSearchFilters(draft);
+  const [multiView, setMultiView] = useState<'list' | 'create'>('list');
+  const [selectedPresetId, setSelectedPresetId] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [draftRoutes, setDraftRoutes] = useState<MultiRoute[]>([]);
+  const [routeFrom, setRouteFrom] = useState('Romania');
+  const [routeTo, setRouteTo] = useState('Germania');
+  const [presetName, setPresetName] = useState('');
+  const selectedPreset = multiPresets.find((preset) => preset.id === selectedPresetId) ?? null;
+  const openCreate = (preset: MultiPreset | null) => {
+    setEditingId(preset?.id ?? null);
+    setDraftRoutes(preset ? preset.routes : []);
+    setPresetName(preset?.name ?? '');
+    setMultiView('create');
+  };
   const [gpsBusy, setGpsBusy] = useState(false);
   const [gpsError, setGpsError] = useState<string | null>(null);
   const toggleGps = () => {
@@ -1800,49 +1947,204 @@ function SearchScreen({
         </button>
       </div>
 
-      <button className="sfield" onClick={openOrigin}>
-        <span className="sfield-ic">
-          <Navigation size={20} />
-        </span>
-        <span className="sfield-body">
-          <small>De la</small>
-          <strong>{draft.origin}</strong>
-        </span>
-        <span
-          className={`sfield-gps ${draft.originSource === 'gps' ? 'on' : ''}`}
-          role="button"
-          tabIndex={0}
-          onClick={(event) => {
-            event.stopPropagation();
-            toggleGps();
-          }}
-        >
-          <Target size={13} /> {gpsBusy ? 'Caut...' : 'GPS'}
-        </span>
-      </button>
-      {gpsError && <p className="gps-status">{gpsError}</p>}
+      <div className="search-type" role="tablist">
+        <span className={`stype-slider ${searchMode === 'multi' ? 'right' : ''}`} aria-hidden="true" />
+        <button className={`stype-opt ${searchMode === 'single' ? 'on' : ''}`} type="button" onClick={() => setSearchMode('single')}>
+          Unică
+        </button>
+        <button className={`stype-opt ${searchMode === 'multi' ? 'on' : ''}`} type="button" onClick={() => setSearchMode('multi')}>
+          Multiplă
+        </button>
+      </div>
 
-      <button className="sfield" onClick={openDestination}>
-        <span className="sfield-ic">
-          <MapPin size={20} />
-        </span>
-        <span className="sfield-body">
-          <small>Spre</small>
-          <strong>{destinationLabel(draft)}</strong>
-        </span>
-        <ChevronRight size={18} className="sfield-chev" />
-      </button>
+      {searchMode === 'single' ? (
+        <>
+          <button className="sfield" onClick={openOrigin}>
+            <span className="sfield-ic">
+              <Navigation size={20} />
+            </span>
+            <span className="sfield-body">
+              <small>De la</small>
+              <strong>{draft.origin}</strong>
+            </span>
+            <span
+              className={`sfield-gps ${draft.originSource === 'gps' ? 'on' : ''}`}
+              role="button"
+              tabIndex={0}
+              onClick={(event) => {
+                event.stopPropagation();
+                toggleGps();
+              }}
+            >
+              <Target size={13} /> {gpsBusy ? 'Caut...' : 'GPS'}
+            </span>
+          </button>
+          {gpsError && <p className="gps-status">{gpsError}</p>}
 
-      <button className="filter-open-btn" onClick={openFilters}>
-        <span className="fob-left">
-          <SlidersHorizontal size={18} /> Filtre
-        </span>
-        {activeFilters > 0 ? <span className="fob-count">{activeFilters}</span> : <ChevronRight size={18} className="fob-chev" />}
-      </button>
+          <button className="sfield" onClick={openDestination}>
+            <span className="sfield-ic">
+              <MapPin size={20} />
+            </span>
+            <span className="sfield-body">
+              <small>Spre</small>
+              <strong>{destinationLabel(draft)}</strong>
+            </span>
+            <ChevronRight size={18} className="sfield-chev" />
+          </button>
 
-      <button className="primary-button wide" onClick={onRun}>
-        <Search size={18} /> Caută curse
-      </button>
+          <button className="filter-open-btn" onClick={openFilters}>
+            <span className="fob-left">
+              <SlidersHorizontal size={18} /> Filtre
+            </span>
+            {activeFilters > 0 ? <span className="fob-count">{activeFilters}</span> : <ChevronRight size={18} className="fob-chev" />}
+          </button>
+
+          <button className="primary-button wide" onClick={onRun}>
+            <Search size={18} /> Caută curse
+          </button>
+        </>
+      ) : multiView === 'create' ? (
+        <>
+          <div className="multi-create-head">
+            <button className="multi-back" type="button" onClick={() => setMultiView('list')} aria-label="Înapoi">
+              <ArrowLeft size={18} />
+            </button>
+            <strong>{editingId ? 'Editează set' : 'Set nou'}</strong>
+          </div>
+
+          <div className="multi-add">
+            <select className="multi-select" value={routeFrom} onChange={(event) => setRouteFrom(event.target.value)} aria-label="De la">
+              {MULTI_COUNTRY_NAMES.map((name) => (
+                <option key={name} value={name}>{countryCode(name)} · {name}</option>
+              ))}
+            </select>
+            <span className="multi-arrow">→</span>
+            <select className="multi-select" value={routeTo} onChange={(event) => setRouteTo(event.target.value)} aria-label="Spre">
+              {MULTI_COUNTRY_NAMES.map((name) => (
+                <option key={name} value={name}>{countryCode(name)} · {name}</option>
+              ))}
+            </select>
+            <button
+              className="multi-add-btn"
+              type="button"
+              title="Adaugă ruta"
+              onClick={() =>
+                setDraftRoutes((current) =>
+                  current.some((item) => item.from === routeFrom && item.to === routeTo)
+                    ? current
+                    : [...current, { from: routeFrom, to: routeTo }]
+                )
+              }
+            >
+              <Plus size={18} />
+            </button>
+          </div>
+
+          {draftRoutes.length > 0 ? (
+            <div className="multi-chips">
+              {draftRoutes.map((route, index) => (
+                <span className="multi-chip" key={`${route.from}-${route.to}-${index}`}>
+                  {multiRouteLabel(route)}
+                  <button
+                    type="button"
+                    onClick={() => setDraftRoutes((current) => current.filter((_, i) => i !== index))}
+                    aria-label="Șterge ruta"
+                  >
+                    <X size={13} />
+                  </button>
+                </span>
+              ))}
+            </div>
+          ) : (
+            <p className="multi-hint">Adaugă rute DE LA → SPRE (ex: TR→RO, MD→RO).</p>
+          )}
+
+          <input
+            className="multi-name"
+            placeholder="Nume set (ex: Tur Balcani)"
+            value={presetName}
+            onChange={(event) => setPresetName(event.target.value)}
+          />
+
+          <div className="multi-create-actions">
+            <button className="secondary-button" type="button" onClick={() => setMultiView('list')}>
+              Anulează
+            </button>
+            <button
+              className="primary-button"
+              type="button"
+              disabled={draftRoutes.length === 0 || !presetName.trim()}
+              onClick={() => {
+                saveMultiPreset(presetName, draftRoutes, editingId);
+                setMultiView('list');
+              }}
+            >
+              <Check size={17} /> Salvează set
+            </button>
+          </div>
+        </>
+      ) : multiPresets.length === 0 ? (
+        <div className="multi-empty">
+          <p>Nu aveți seturi salvate.</p>
+          <button className="primary-button wide" type="button" onClick={() => openCreate(null)}>
+            <Plus size={18} /> Creare set
+          </button>
+        </div>
+      ) : (
+        <>
+          <div className="multi-set-list">
+            {multiPresets.map((preset) => (
+              <div
+                key={preset.id}
+                className={`multi-set ${selectedPresetId === preset.id ? 'active' : ''}`}
+                onClick={() => setSelectedPresetId(preset.id)}
+                role="button"
+                tabIndex={0}
+              >
+                <div className="multi-set-info">
+                  <strong>{preset.name}</strong>
+                  <small>{routesSummary(preset.routes)}</small>
+                </div>
+                <div className="multi-set-actions">
+                  <button
+                    type="button"
+                    className="multi-set-btn"
+                    aria-label="Editează"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      openCreate(preset);
+                    }}
+                  >
+                    <Pencil size={15} />
+                  </button>
+                  <button
+                    type="button"
+                    className="multi-set-btn del"
+                    aria-label="Șterge"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      deleteMultiPreset(preset.id);
+                      if (selectedPresetId === preset.id) setSelectedPresetId(null);
+                    }}
+                  >
+                    <Trash2 size={15} />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <button className="multi-create-new" type="button" onClick={() => openCreate(null)}>
+            <Plus size={16} /> Creare nou
+          </button>
+
+          {selectedPreset && (
+            <button className="primary-button wide" type="button" onClick={() => onRunMulti(selectedPreset.routes)}>
+              <Search size={18} /> Caută ({selectedPreset.routes.length} rute)
+            </button>
+          )}
+        </>
+      )}
     </section>
   );
 }
@@ -2027,38 +2329,38 @@ function OriginScreen({
   return (
     <section className="screen-stack">
       <StepHeader title="Locatia ta" onBack={onBack} />
-      <div className="location-card">
-        <SmartField
-          icon={<Navigation size={19} />}
-          title="Locatie folosita acum"
-          value={draft.origin}
-          subtitle={originSubtitle(draft)}
-          action={
-            <button
-              className={`sfield-gps ${draft.originSource === 'gps' ? 'on' : ''}`}
-              type="button"
-              onClick={detectGps}
-              disabled={detecting}
-              title="Foloseste GPS"
-            >
-              <Target size={13} /> {detecting ? 'Caut...' : 'GPS'}
-            </button>
-          }
-        />
-        <form
-          className="location-form"
-          onSubmit={(event: FormEvent) => {
-            event.preventDefault();
-            applyOrigin();
-          }}
-        >
-          <TextInput label="Schimba locatia manual" value={manualOrigin} placeholder="Ex: Arad, Romania" onChange={setManualOrigin} />
-          <button className="primary-button wide" type="submit">
-            Aplica locatia
-          </button>
-        </form>
-        {gpsStatus && <p className="gps-status">{gpsStatus}</p>}
-      </div>
+      <form
+        className="location-form"
+        onSubmit={(event: FormEvent) => {
+          event.preventDefault();
+          applyOrigin();
+        }}
+      >
+        <TextInput label="Schimba locatia manual" value={manualOrigin} placeholder="Ex: Arad, Romania" onChange={setManualOrigin} />
+        <div className="location-card">
+          <SmartField
+            icon={<Navigation size={19} />}
+            title="Locatie folosita acum"
+            value={draft.origin}
+            subtitle={originSubtitle(draft)}
+            action={
+              <button
+                className={`sfield-gps ${draft.originSource === 'gps' ? 'on' : ''}`}
+                type="button"
+                onClick={detectGps}
+                disabled={detecting}
+                title="Foloseste GPS"
+              >
+                <Target size={13} /> {detecting ? 'Caut...' : 'GPS'}
+              </button>
+            }
+          />
+          {gpsStatus && <p className="gps-status">{gpsStatus}</p>}
+        </div>
+        <button className="primary-button wide" type="submit">
+          Aplica locatia
+        </button>
+      </form>
       <div className="section-label">Locatii rapide</div>
       <div className="option-list">
         {originOptions.map((option) => (
@@ -2554,6 +2856,8 @@ function ResultsScreen({
   onNewSearch,
   onEditSearch,
   resultFilters,
+  multiActive,
+  multiRoutes,
   openFilters
 }: {
   query: string;
@@ -2567,6 +2871,8 @@ function ResultsScreen({
   onNewSearch: () => void;
   onEditSearch: () => void;
   resultFilters: SearchDraft;
+  multiActive: boolean;
+  multiRoutes: MultiRoute[];
   openFilters: () => void;
 }) {
   const [sortPrice, setSortPrice] = useState<'none' | 'asc' | 'desc'>('none');
@@ -2614,7 +2920,22 @@ function ResultsScreen({
           </button>
         </div>
       </div>
-      <ResultsRouteBar query={query} draft={resultFilters} onChange={onEditSearch} onMap={goMap} />
+      {multiActive ? (
+        <div className="results-multi-bar">
+          <div className="results-multi-chips">
+            {multiRoutes.map((route, index) => (
+              <span className="multi-chip readonly" key={`${route.from}-${route.to}-${index}`}>
+                {multiRouteLabel(route)}
+              </span>
+            ))}
+          </div>
+          <button className="results-route-map" type="button" onClick={goMap} aria-label="Vezi pe hartă">
+            <MapPinned size={18} />
+          </button>
+        </div>
+      ) : (
+        <ResultsRouteBar query={query} draft={resultFilters} onChange={onEditSearch} onMap={goMap} />
+      )}
       <div className="result-filter-bar">
         <button className={`filter-pill ${activeFilterCount > 0 ? 'active' : ''}`} type="button" onClick={openFilters}>
           <SlidersHorizontal size={15} />
@@ -2760,7 +3081,7 @@ function LoadCard({ load, onClick }: { load: Load; onClick: () => void }) {
   );
 }
 
-function MapScreen({ openLoad, goList, hasActiveSearch, searchLoads, onNewSearch, searchDraft, alertLoads }: { openLoad: (load: Load) => void; goList: () => void; hasActiveSearch: boolean; searchLoads: Load[]; onNewSearch: () => void; searchDraft: SearchDraft; alertLoads: Load[] }) {
+function MapScreen({ openLoad, goList, hasActiveSearch, searchLoads, onNewSearch, searchDraft, alertLoads, multiActive, multiRoutes }: { openLoad: (load: Load) => void; goList: () => void; hasActiveSearch: boolean; searchLoads: Load[]; onNewSearch: () => void; searchDraft: SearchDraft; alertLoads: Load[]; multiActive: boolean; multiRoutes: MultiRoute[] }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<any>(null);
   const layerRef = useRef<any>(null);
@@ -3049,9 +3370,15 @@ function MapScreen({ openLoad, goList, hasActiveSearch, searchLoads, onNewSearch
                 <ArrowLeft size={18} />
               </button>
               <div className="map-route">
-                <span>{routeFrom}</span>
-                <span className="map-route-arrow">→</span>
-                <span>{routeTo}</span>
+                {multiActive ? (
+                  <span className="map-route-multi">{routesSummary(multiRoutes)}</span>
+                ) : (
+                  <>
+                    <span>{routeFrom}</span>
+                    <span className="map-route-arrow">→</span>
+                    <span>{routeTo}</span>
+                  </>
+                )}
               </div>
               <button className="map-chip-btn" onClick={onNewSearch} title="Cautare noua">
                 <Search size={14} /> Caută nou
@@ -3419,12 +3746,25 @@ function NotificationsScreen({
 function SavedOffersScreen({
   savedOffers,
   openLoad,
-  onBack
+  onBack,
+  savedSearches,
+  multiPresets,
+  performSearch,
+  onDeleteSearch,
+  onRunPreset,
+  onDeletePreset
 }: {
   savedOffers: Load[];
   openLoad: (load: Load) => void;
   onBack: () => void;
+  savedSearches: SavedSearch[];
+  multiPresets: MultiPreset[];
+  performSearch: (query?: string) => void;
+  onDeleteSearch: (search: SavedSearch) => void;
+  onRunPreset: (preset: MultiPreset) => void;
+  onDeletePreset: (id: string) => void;
 }) {
+  const [tab, setTab] = useState<'cautari' | 'oferte'>('cautari');
   return (
     <section className="screen-stack">
       <div className="detail-top">
@@ -3434,12 +3774,64 @@ function SavedOffersScreen({
         <h3>Cautari Salvate</h3>
         <span />
       </div>
-      <div className="results-list">
-        {savedOffers.map((load) => (
-          <LoadCard key={load.id} load={load} onClick={() => openLoad(load)} />
-        ))}
+      <div className="saved-tabs">
+        <button className={tab === 'cautari' ? 'on' : ''} type="button" onClick={() => setTab('cautari')}>
+          Căutări & Seturi
+        </button>
+        <button className={tab === 'oferte' ? 'on' : ''} type="button" onClick={() => setTab('oferte')}>
+          Oferte favorite
+        </button>
       </div>
-      {savedOffers.length === 0 && <EmptyState title="Nu ai oferte salvate. Deschide o cursă și apasă Salvează." />}
+      {tab === 'cautari' ? (
+        <>
+          {multiPresets.length === 0 && savedSearches.length === 0 && (
+            <EmptyState title="Nu ai căutări sau seturi salvate." />
+          )}
+          {multiPresets.map((preset) => (
+            <div className="saved-search-card" key={`set-${preset.id}`}>
+              <button onClick={() => onRunPreset(preset)}>
+                <Bookmark size={17} />
+                <div>
+                  <strong>{preset.name}</strong>
+                  <small>{routesSummary(preset.routes)}</small>
+                </div>
+                <ChevronRight size={17} />
+              </button>
+              <div className="saved-actions">
+                <button onClick={() => onDeletePreset(preset.id)} aria-label="Șterge set">
+                  <Trash2 size={15} />
+                </button>
+              </div>
+            </div>
+          ))}
+          {savedSearches.map((search) => (
+            <div className="saved-search-card" key={`s-${search.id}`}>
+              <button onClick={() => performSearch(search.query)}>
+                <Search size={17} />
+                <div>
+                  <strong>{search.query}</strong>
+                  <small>{search.notificationsEnabled ? 'Alertă activă' : 'Doar salvată'}</small>
+                </div>
+                <ChevronRight size={17} />
+              </button>
+              <div className="saved-actions">
+                <button onClick={() => onDeleteSearch(search)} aria-label="Șterge căutarea">
+                  <Trash2 size={15} />
+                </button>
+              </div>
+            </div>
+          ))}
+        </>
+      ) : (
+        <>
+          <div className="results-list">
+            {savedOffers.map((load) => (
+              <LoadCard key={load.id} load={load} onClick={() => openLoad(load)} />
+            ))}
+          </div>
+          {savedOffers.length === 0 && <EmptyState title="Nu ai oferte salvate. Deschide o cursă și apasă Salvează." />}
+        </>
+      )}
     </section>
   );
 }
@@ -3796,7 +4188,7 @@ function SettingsScreen({
             <ChevronRight size={17} />
           </div>
           <div className="compact-row compact-row-link" onClick={onOpenSaved}>
-            <RowIcon icon={<Bookmark size={17} />} title="Cautari Salvate" subtitle={`${savedOffersCount} salvate`} />
+            <RowIcon icon={<Bookmark size={17} />} title="Cautari Salvate" subtitle="Căutări, seturi și oferte" />
             <ChevronRight size={17} />
           </div>
         </div>
