@@ -36,6 +36,7 @@ import {
   Truck,
   Users,
   LayoutGrid,
+  Layers,
   TrendingUp,
   User,
   X,
@@ -296,6 +297,59 @@ function spreadMarker(lat: number, lon: number, index: number, total: number): [
   const dLat = radius * Math.cos(angle);
   const dLon = (radius * Math.sin(angle)) / Math.cos((lat * Math.PI) / 180);
   return [lat + dLat, lon + dLon];
+}
+
+type MapTileLayer = { url: string; options: Record<string, unknown> };
+type MapTileStyle = { key: string; label: string; layers: MapTileLayer[] };
+
+const MAP_TILES: MapTileStyle[] = [
+  {
+    key: 'dark',
+    label: 'Întunecat',
+    layers: [
+      { url: 'https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png', options: { subdomains: 'abcd', maxZoom: 19, attribution: '&copy; OpenStreetMap &copy; CARTO' } },
+      { url: 'https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}{r}.png', options: { subdomains: 'abcd', maxZoom: 19 } }
+    ]
+  },
+  {
+    key: 'light',
+    label: 'Luminos',
+    layers: [
+      { url: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', options: { subdomains: 'abcd', maxZoom: 19, attribution: '&copy; OpenStreetMap &copy; CARTO' } }
+    ]
+  },
+  {
+    key: 'streets',
+    label: 'Stradal',
+    layers: [
+      { url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', options: { subdomains: 'abc', maxZoom: 19, attribution: '&copy; OpenStreetMap' } }
+    ]
+  },
+  {
+    key: 'satellite',
+    label: 'Satelit',
+    layers: [
+      { url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', options: { maxZoom: 19, attribution: '&copy; Esri' } },
+      { url: 'https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}{r}.png', options: { subdomains: 'abcd', maxZoom: 19 } }
+    ]
+  },
+  {
+    key: 'terrain',
+    label: 'Teren',
+    layers: [
+      { url: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', options: { subdomains: 'abc', maxZoom: 17, attribution: '&copy; OpenTopoMap' } }
+    ]
+  }
+];
+
+function applyMapTiles(L: any, map: any, styleKey: string, tileRef: { current: any[] }) {
+  if (tileRef.current && tileRef.current.length) {
+    tileRef.current.forEach((layer) => {
+      try { map.removeLayer(layer); } catch { /* ignore */ }
+    });
+  }
+  const style = MAP_TILES.find((item) => item.key === styleKey) ?? MAP_TILES[0];
+  tileRef.current = style.layers.map((cfg) => L.tileLayer(cfg.url, cfg.options).addTo(map));
 }
 
 function originFromGps(lat: number, lng: number) {
@@ -3085,6 +3139,7 @@ function MapScreen({ openLoad, goList, hasActiveSearch, searchLoads, onNewSearch
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<any>(null);
   const layerRef = useRef<any>(null);
+  const tileRef = useRef<any[]>([]);
   const zonePreferenceTouchedRef = useRef(false);
   const openRef = useRef(openLoad);
   useEffect(() => {
@@ -3097,6 +3152,9 @@ function MapScreen({ openLoad, goList, hasActiveSearch, searchLoads, onNewSearch
   const [zoneOnly, setZoneOnly] = useState(true);
   const [alertActive, setAlertActive] = useState(false);
   const [showFilters, setShowFilters] = useState(false);
+  const [mapStyle, setMapStyle] = usePersistentState('loadhub.map.style', 'dark');
+  const [styleMenuOpen, setStyleMenuOpen] = useState(false);
+  const [popupLoad, setPopupLoad] = useState<Load | null>(null);
   const [priceOnly, setPriceOnly] = usePersistentState('loadhub.map.priceOnly', false);
   const [truck, setTruck] = usePersistentState('loadhub.map.truck', 'Orice');
   const [age, setAge] = usePersistentState('loadhub.map.age', 'Oricand');
@@ -3185,19 +3243,9 @@ function MapScreen({ openLoad, goList, hasActiveSearch, searchLoads, onNewSearch
     if (!L || !container) return;
     const map = L.map(container, { zoomControl: false, attributionControl: true }).setView([45.9, 24.9], 6);
     map.attributionControl.setPrefix('');
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png', {
-      subdomains: 'abcd',
-      maxZoom: 19,
-      attribution: '&copy; OpenStreetMap &copy; CARTO',
-      className: 'map-base-tiles'
-    }).addTo(map);
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}{r}.png', {
-      subdomains: 'abcd',
-      maxZoom: 19,
-      className: 'map-label-tiles'
-    }).addTo(map);
     layerRef.current = L.layerGroup().addTo(map);
     mapRef.current = map;
+    map.on('click', () => setPopupLoad(null));
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
         (position) => {
@@ -3215,8 +3263,16 @@ function MapScreen({ openLoad, goList, hasActiveSearch, searchLoads, onNewSearch
       map.remove();
       mapRef.current = null;
       layerRef.current = null;
+      tileRef.current = [];
     };
   }, []);
+
+  useEffect(() => {
+    const L = (window as unknown as { L?: any }).L;
+    const map = mapRef.current;
+    if (!L || !map) return;
+    applyMapTiles(L, map, mapStyle, tileRef);
+  }, [mapStyle]);
 
   useEffect(() => {
     const L = (window as unknown as { L?: any }).L;
@@ -3274,7 +3330,10 @@ function MapScreen({ openLoad, goList, hasActiveSearch, searchLoads, onNewSearch
         iconAnchor: [0, 0]
       });
       const marker = L.marker([olat, olon], { icon }).addTo(layer);
-      marker.on('click', () => openRef.current(load));
+      marker.on('click', (event: any) => {
+        if (event?.originalEvent) L.DomEvent.stopPropagation(event.originalEvent);
+        setPopupLoad(load);
+      });
 
       if (hasActiveSearch && typeof load.unloadLat === 'number' && typeof load.unloadLon === 'number') {
         const dk = coordKey(load.unloadLat, load.unloadLon);
@@ -3288,7 +3347,10 @@ function MapScreen({ openLoad, goList, hasActiveSearch, searchLoads, onNewSearch
           iconAnchor: [0, 0]
         });
         const destMarker = L.marker([dlat, dlon], { icon: destIcon }).addTo(layer);
-        destMarker.on('click', () => openRef.current(load));
+        destMarker.on('click', (event: any) => {
+          if (event?.originalEvent) L.DomEvent.stopPropagation(event.originalEvent);
+          setPopupLoad(load);
+        });
       }
     });
   }, [filtered, hasActiveSearch, geoCenter]);
@@ -3363,6 +3425,60 @@ function MapScreen({ openLoad, goList, hasActiveSearch, searchLoads, onNewSearch
     <section className="map-screen">
       <div className="map-leaflet-wrap full">
         <div className="map-leaflet" ref={containerRef} />
+        <div className="map-style-control">
+          {styleMenuOpen && (
+            <div className="map-style-menu">
+              {MAP_TILES.map((style) => (
+                <button
+                  key={style.key}
+                  className={mapStyle === style.key ? 'on' : ''}
+                  type="button"
+                  onClick={() => {
+                    setMapStyle(style.key);
+                    setStyleMenuOpen(false);
+                  }}
+                >
+                  {style.label}
+                </button>
+              ))}
+            </div>
+          )}
+          <button
+            className="map-style-toggle"
+            type="button"
+            onClick={() => setStyleMenuOpen((value) => !value)}
+            aria-label="Tip hartă"
+            title="Tip hartă"
+          >
+            <Layers size={20} />
+          </button>
+        </div>
+        {popupLoad && (
+          <div className="map-popup">
+            <button className="map-popup-x" type="button" onClick={() => setPopupLoad(null)} aria-label="Închide">
+              <X size={16} />
+            </button>
+            <div className="map-popup-route">
+              <strong>{compactLocation(popupLoad.loadCity, popupLoad.loadCountry, 'Start')}</strong>
+              <span className="map-popup-arrow">→</span>
+              <strong>{compactLocation(popupLoad.unloadCity, popupLoad.unloadCountry, 'Destinație')}</strong>
+            </div>
+            <div className="map-popup-meta">
+              {formatRouteDistance(popupLoad) && (
+                <span>
+                  <Navigation size={12} /> {formatRouteDistance(popupLoad)}
+                </span>
+              )}
+              <span>
+                <Clock size={12} /> {formatDate(popupLoad.loadDate)}
+              </span>
+              {popupLoad.price && <span className="map-popup-price">{popupLoad.price}</span>}
+            </div>
+            <button className="map-popup-more" type="button" onClick={() => openRef.current(popupLoad)}>
+              Vezi mai mult <ChevronRight size={15} />
+            </button>
+          </div>
+        )}
         {hasActiveSearch ? (
           <div className="map-topbar map-topbar-search">
             <div className="map-search-line">
