@@ -2286,6 +2286,23 @@ button:disabled {
   cursor: pointer;
 }
 
+.map-leaflet-wrap.light-ui .map-back-btn,
+.map-leaflet-wrap.light-ui .map-route {
+  background: rgba(13, 12, 22, 0.9);
+  border-color: rgba(255, 255, 255, 0.18);
+  color: #fff;
+}
+
+.map-leaflet-wrap.light-ui .map-route > span,
+.map-leaflet-wrap.light-ui .map-route strong {
+  color: #fff;
+}
+
+.map-leaflet-wrap.light-ui .map-chip-btn,
+.map-leaflet-wrap.light-ui .map-count {
+  background: rgba(13, 12, 22, 0.9);
+}
+
 .map-empty {
   position: absolute;
   inset: 0;

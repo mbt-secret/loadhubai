@@ -3423,7 +3423,7 @@ function MapScreen({ openLoad, goList, hasActiveSearch, searchLoads, onNewSearch
 
   return (
     <section className="map-screen">
-      <div className="map-leaflet-wrap full">
+      <div className={`map-leaflet-wrap full${mapStyle !== 'dark' ? ' light-ui' : ''}`}>
         <div className="map-leaflet" ref={containerRef} />
         <div className="map-style-control">
           {styleMenuOpen && (
