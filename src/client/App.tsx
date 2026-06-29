@@ -3086,6 +3086,21 @@ function loadDayDiff(loadDate: string | null): number | null {
   return Math.round((target.getTime() - today.getTime()) / 86400000);
 }
 
+// Prioritate pentru harta: data cea mai apropiata (azi/viitor) prima, apoi trecut, apoi fara data.
+function mapDatePriority(load: Load): number {
+  const diff = loadDayDiff(load.loadDate);
+  if (diff === null) return 1e9;
+  return diff >= 0 ? diff : 1e6 + Math.abs(diff);
+}
+
+function maxMarkersForZoom(zoom: number): number {
+  if (zoom <= 7) return 14;
+  if (zoom === 8) return 40;
+  if (zoom === 9) return 90;
+  if (zoom === 10) return 200;
+  return 500;
+}
+
 function LoadCard({ load, onClick }: { load: Load; onClick: () => void }) {
   const now = useMinuteTick();
   const eta = formatTimeUntilLoad(load.loadDate, now);
@@ -3155,6 +3170,8 @@ function MapScreen({ openLoad, goList, hasActiveSearch, searchLoads, onNewSearch
   const [mapStyle, setMapStyle] = usePersistentState('loadhub.map.style', 'dark');
   const [styleMenuOpen, setStyleMenuOpen] = useState(false);
   const [popupLoad, setPopupLoad] = useState<Load | null>(null);
+  const [mapView, setMapView] = useState<{ zoom: number; bounds: any } | null>(null);
+  const [expandedLoads, setExpandedLoads] = useState<Load[]>([]);
   const [priceOnly, setPriceOnly] = usePersistentState('loadhub.map.priceOnly', false);
   const [truck, setTruck] = usePersistentState('loadhub.map.truck', 'Orice');
   const [age, setAge] = usePersistentState('loadhub.map.age', 'Oricand');
@@ -3245,7 +3262,10 @@ function MapScreen({ openLoad, goList, hasActiveSearch, searchLoads, onNewSearch
     map.attributionControl.setPrefix('');
     layerRef.current = L.layerGroup().addTo(map);
     mapRef.current = map;
-    map.on('click', () => setPopupLoad(null));
+    map.on('click', () => { setPopupLoad(null); setExpandedLoads([]); });
+    const syncView = () => setMapView({ zoom: map.getZoom(), bounds: map.getBounds() });
+    map.on('moveend zoomend', syncView);
+    syncView();
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
         (position) => {
@@ -3298,26 +3318,13 @@ function MapScreen({ openLoad, goList, hasActiveSearch, searchLoads, onNewSearch
       L.marker([geoCenter.lat, geoCenter.lng], { icon: meIcon, interactive: false, zIndexOffset: 1000 }).addTo(layer);
     }
 
-    const coordKey = (lat: number, lon: number) => `${lat.toFixed(3)},${lon.toFixed(3)}`;
-    const originGroups = new Map<string, number>();
-    const destGroups = new Map<string, number>();
-    filtered.forEach((load) => {
-      const ok = coordKey(load.loadLat as number, load.loadLon as number);
-      originGroups.set(ok, (originGroups.get(ok) || 0) + 1);
-      if (hasActiveSearch && typeof load.unloadLat === 'number' && typeof load.unloadLon === 'number') {
-        const dk = coordKey(load.unloadLat, load.unloadLon);
-        destGroups.set(dk, (destGroups.get(dk) || 0) + 1);
-      }
-    });
-    const originSeen = new Map<string, number>();
-    const destSeen = new Map<string, number>();
+    const zoom = mapView?.zoom ?? (mapRef.current?.getZoom ? mapRef.current.getZoom() : 6);
+    const bounds = mapView?.bounds ?? null;
+    const inView = (la: number, lo: number) => !bounds || bounds.contains([la, lo]);
+    const EXPAND_ZOOM = 12;
+    const coordKey = (la: number, lo: number) => `${la.toFixed(4)},${lo.toFixed(4)}`;
 
-    filtered.forEach((load) => {
-      const ok = coordKey(load.loadLat as number, load.loadLon as number);
-      const oIdx = originSeen.get(ok) || 0;
-      originSeen.set(ok, oIdx + 1);
-      const [olat, olon] = spreadMarker(load.loadLat as number, load.loadLon as number, oIdx, originGroups.get(ok) || 1);
-
+    const drawLoadPin = (load: Load, la: number, lo: number) => {
       const label = load.price ?? (load.weightTons ? `${load.weightTons}t` : '•');
       const destination = mapPinDestination(load);
       const destinationHtml = destination
@@ -3329,31 +3336,97 @@ function MapScreen({ openLoad, goList, hasActiveSearch, searchLoads, onNewSearch
         iconSize: [0, 0],
         iconAnchor: [0, 0]
       });
-      const marker = L.marker([olat, olon], { icon }).addTo(layer);
+      const marker = L.marker([la, lo], { icon }).addTo(layer);
       marker.on('click', (event: any) => {
         if (event?.originalEvent) L.DomEvent.stopPropagation(event.originalEvent);
         setPopupLoad(load);
       });
+    };
 
-      if (hasActiveSearch && typeof load.unloadLat === 'number' && typeof load.unloadLon === 'number') {
-        const dk = coordKey(load.unloadLat, load.unloadLon);
-        const dIdx = destSeen.get(dk) || 0;
-        destSeen.set(dk, dIdx + 1);
-        const [dlat, dlon] = spreadMarker(load.unloadLat, load.unloadLon, dIdx, destGroups.get(dk) || 1);
+    const drawScattered = (loads: Load[]) => {
+      const counts = new Map<string, number>();
+      loads.forEach((item) => {
+        const k = coordKey(item.loadLat as number, item.loadLon as number);
+        counts.set(k, (counts.get(k) || 0) + 1);
+      });
+      const seen = new Map<string, number>();
+      loads.forEach((load) => {
+        const k = coordKey(load.loadLat as number, load.loadLon as number);
+        const idx = seen.get(k) || 0;
+        seen.set(k, idx + 1);
+        const [la, lo] = spreadMarker(load.loadLat as number, load.loadLon as number, idx, counts.get(k) || 1);
+        drawLoadPin(load, la, lo);
+      });
+    };
+
+    const expandedIds = new Set(expandedLoads.map((item) => item.id));
+
+    if (zoom >= EXPAND_ZOOM) {
+      drawScattered(filtered.filter((load) => inView(load.loadLat as number, load.loadLon as number)));
+    } else {
+      const degPerPx = 360 / (256 * Math.pow(2, zoom));
+      const cellDeg = Math.max(58 * degPerPx, 0.0001);
+      const clusters = new Map<string, Load[]>();
+      filtered.forEach((load) => {
+        const la = load.loadLat as number;
+        const lo = load.loadLon as number;
+        if (!inView(la, lo) || expandedIds.has(load.id)) return;
+        const key = `${Math.floor(la / cellDeg)}_${Math.floor(lo / cellDeg)}`;
+        const arr = clusters.get(key);
+        if (arr) arr.push(load);
+        else clusters.set(key, [load]);
+      });
+      clusters.forEach((group) => {
+        if (group.length === 1) {
+          drawLoadPin(group[0], group[0].loadLat as number, group[0].loadLon as number);
+          return;
+        }
+        const clat = group.reduce((sum, item) => sum + (item.loadLat as number), 0) / group.length;
+        const clon = group.reduce((sum, item) => sum + (item.loadLon as number), 0) / group.length;
+        const sizeClass = group.length >= 50 ? ' big' : group.length >= 15 ? ' mid' : '';
+        const clusterIcon = L.divIcon({
+          className: 'map-cluster-wrap',
+          html: `<span class="map-cluster${sizeClass}"><span class="map-cluster-pulse"></span><span class="map-cluster-count">${group.length}</span></span>`,
+          iconSize: [0, 0],
+          iconAnchor: [0, 0]
+        });
+        const clusterMarker = L.marker([clat, clon], { icon: clusterIcon }).addTo(layer);
+        clusterMarker.on('click', (event: any) => {
+          if (event?.originalEvent) L.DomEvent.stopPropagation(event.originalEvent);
+          const map = mapRef.current;
+          const lats = group.map((item) => item.loadLat as number);
+          const lons = group.map((item) => item.loadLon as number);
+          const spread = Math.max(Math.max(...lats) - Math.min(...lats), Math.max(...lons) - Math.min(...lons));
+          if (spread > cellDeg * 0.4 && map) {
+            map.flyTo([clat, clon], Math.min(zoom + 2, 13), { duration: 0.5 });
+          } else {
+            setExpandedLoads(group);
+          }
+        });
+      });
+      if (expandedLoads.length) {
+        drawScattered(expandedLoads.filter((load) => inView(load.loadLat as number, load.loadLon as number)));
+      }
+    }
+
+    if (hasActiveSearch) {
+      filtered.forEach((load) => {
+        if (typeof load.unloadLat !== 'number' || typeof load.unloadLon !== 'number') return;
+        if (!inView(load.unloadLat, load.unloadLon)) return;
         const destIcon = L.divIcon({
           className: 'dest-pin-wrap',
           html: '<span class="dest-pin"></span>',
           iconSize: [0, 0],
           iconAnchor: [0, 0]
         });
-        const destMarker = L.marker([dlat, dlon], { icon: destIcon }).addTo(layer);
+        const destMarker = L.marker([load.unloadLat, load.unloadLon], { icon: destIcon }).addTo(layer);
         destMarker.on('click', (event: any) => {
           if (event?.originalEvent) L.DomEvent.stopPropagation(event.originalEvent);
           setPopupLoad(load);
         });
-      }
-    });
-  }, [filtered, hasActiveSearch, geoCenter]);
+      });
+    }
+  }, [filtered, hasActiveSearch, geoCenter, mapView, expandedLoads]);
 
   useEffect(() => {
     if (hasActiveSearch || zoneOnly) return;

@@ -76,7 +76,7 @@ function cityVariants(cityName) {
   return Array.from(new Set([raw, withoutParentheses].filter(Boolean)));
 }
 
-export function resolveKnownCoordinates(cityName, countryName) {
+export function resolveKnownCoordinates(cityName, countryName, { allowCountry = true } = {}) {
   const countryKey = normalizeText(countryName);
   if (!countryKey) return null;
 
@@ -85,5 +85,7 @@ export function resolveKnownCoordinates(cityName, countryName) {
     if (cityCoords) return cityCoords;
   }
 
-  return COUNTRY_COORDINATES.get(countryKey) ?? null;
+  // allowCountry=false => nu plasam un punct pe centrul tarii cand orasul nu e gasit
+  // (altfel toate ofertele negeolocalizate s-ar aduna intr-un singur punct).
+  return allowCountry ? (COUNTRY_COORDINATES.get(countryKey) ?? null) : null;
 }

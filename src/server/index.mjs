@@ -63,7 +63,8 @@ function resolvePointCoord(latValue, lonValue, cityName, countryName) {
   const lat = latValue == null ? NaN : Number(latValue);
   const lon = lonValue == null ? NaN : Number(lonValue);
   if (Number.isFinite(lat) && Number.isFinite(lon)) return { lat, lon };
-  return findPlaceCoordinates(db, cityName, countryName) ?? resolveKnownCoordinates(cityName, countryName);
+  // Doar coordonate la nivel de oras; fara fallback pe centrul tarii (ar aglomera totul intr-un punct).
+  return findPlaceCoordinates(db, cityName, countryName) ?? resolveKnownCoordinates(cityName, countryName, { allowCountry: false });
 }
 
 function withResolvedCoordinates(load) {
