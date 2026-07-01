@@ -37,6 +37,7 @@ import {
   Users,
   LayoutGrid,
   Layers,
+  Sun,
   TrendingUp,
   User,
   X,
@@ -815,6 +816,10 @@ function App() {
   const [searchMode, setSearchMode] = usePersistentState<'single' | 'multi'>('loadhub.search.mode', 'single', 7200000);
   const [multiRoutes, setMultiRoutes] = usePersistentState<MultiRoute[]>('loadhub.search.multiRoutes', [], 7200000);
   const [multiActive, setMultiActive] = usePersistentState('loadhub.search.multiActive', false, 7200000);
+  const [theme, setTheme] = usePersistentState('loadhub.appTheme', 'light');
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+  }, [theme]);
   const [multiPresets, setMultiPresets] = useState<MultiPreset[]>(() => readMultiPresets());
   const [priceOnlyResults, setPriceOnlyResults] = useState(false);
   const [groupFilter, setGroupFilter] = useState('');
@@ -1505,6 +1510,8 @@ function App() {
               onToggleGroup={toggleGroup}
               onOpenSaved={() => setView('savedOffers')}
               savedOffersCount={savedOffers.length}
+              theme={theme}
+              setTheme={setTheme}
               onClearData={async () => {
                 if (!window.confirm('Stergi mesajele, cursele, grupurile si sesiunea WhatsApp locala?')) return;
                 await run(async () => {
@@ -2036,7 +2043,7 @@ function SearchScreen({
           {gpsError && <p className="gps-status">{gpsError}</p>}
 
           <button className="sfield" onClick={openDestination}>
-            <span className="sfield-ic">
+            <span className="sfield-ic dest">
               <MapPin size={20} />
             </span>
             <span className="sfield-body">
@@ -3167,7 +3174,7 @@ function MapScreen({ openLoad, goList, hasActiveSearch, searchLoads, onNewSearch
   const [zoneOnly, setZoneOnly] = useState(true);
   const [alertActive, setAlertActive] = useState(false);
   const [showFilters, setShowFilters] = useState(false);
-  const [mapStyle, setMapStyle] = usePersistentState('loadhub.map.style', 'dark');
+  const [mapStyle, setMapStyle] = usePersistentState('loadhub.map.tiles', 'streets');
   const [styleMenuOpen, setStyleMenuOpen] = useState(false);
   const [popupLoad, setPopupLoad] = useState<Load | null>(null);
   const [mapView, setMapView] = useState<{ zoom: number; bounds: any } | null>(null);
@@ -3319,20 +3326,21 @@ function MapScreen({ openLoad, goList, hasActiveSearch, searchLoads, onNewSearch
     }
 
     const zoom = mapView?.zoom ?? (mapRef.current?.getZoom ? mapRef.current.getZoom() : 6);
-    const bounds = mapView?.bounds ?? null;
-    const inView = (la: number, lo: number) => !bounds || bounds.contains([la, lo]);
     const EXPAND_ZOOM = 12;
+    const SMALL_EXPAND_ZOOM = 9;
     const coordKey = (la: number, lo: number) => `${la.toFixed(4)},${lo.toFixed(4)}`;
+    const map0 = mapRef.current;
 
-    const drawLoadPin = (load: Load, la: number, lo: number) => {
+    const drawLoadPin = (load: Load, la: number, lo: number, animate: boolean) => {
       const label = load.price ?? (load.weightTons ? `${load.weightTons}t` : '•');
       const destination = mapPinDestination(load);
       const destinationHtml = destination
         ? `<span class="price-pin-destination">${escapeMapPinText(destination)}</span>`
         : '';
+      const spreadClass = animate ? ' pin-spread' : '';
       const icon = L.divIcon({
         className: 'price-pin-wrap',
-        html: `<span class="price-pin"><span class="price-pin-value">${escapeMapPinText(label)}</span>${destinationHtml}</span>`,
+        html: `<span class="price-pin${spreadClass}"><span class="price-pin-value">${escapeMapPinText(label)}</span>${destinationHtml}</span>`,
         iconSize: [0, 0],
         iconAnchor: [0, 0]
       });
@@ -3343,7 +3351,7 @@ function MapScreen({ openLoad, goList, hasActiveSearch, searchLoads, onNewSearch
       });
     };
 
-    const drawScattered = (loads: Load[]) => {
+    const drawScattered = (loads: Load[], animate: boolean) => {
       const counts = new Map<string, number>();
       loads.forEach((item) => {
         const k = coordKey(item.loadLat as number, item.loadLon as number);
@@ -3355,22 +3363,22 @@ function MapScreen({ openLoad, goList, hasActiveSearch, searchLoads, onNewSearch
         const idx = seen.get(k) || 0;
         seen.set(k, idx + 1);
         const [la, lo] = spreadMarker(load.loadLat as number, load.loadLon as number, idx, counts.get(k) || 1);
-        drawLoadPin(load, la, lo);
+        drawLoadPin(load, la, lo, animate);
       });
     };
 
     const expandedIds = new Set(expandedLoads.map((item) => item.id));
 
     if (zoom >= EXPAND_ZOOM) {
-      drawScattered(filtered.filter((load) => inView(load.loadLat as number, load.loadLon as number)));
+      drawScattered(filtered.slice(), true);
     } else {
       const degPerPx = 360 / (256 * Math.pow(2, zoom));
       const cellDeg = Math.max(58 * degPerPx, 0.0001);
       const clusters = new Map<string, Load[]>();
       filtered.forEach((load) => {
+        if (expandedIds.has(load.id)) return;
         const la = load.loadLat as number;
         const lo = load.loadLon as number;
-        if (!inView(la, lo) || expandedIds.has(load.id)) return;
         const key = `${Math.floor(la / cellDeg)}_${Math.floor(lo / cellDeg)}`;
         const arr = clusters.get(key);
         if (arr) arr.push(load);
@@ -3378,7 +3386,11 @@ function MapScreen({ openLoad, goList, hasActiveSearch, searchLoads, onNewSearch
       });
       clusters.forEach((group) => {
         if (group.length === 1) {
-          drawLoadPin(group[0], group[0].loadLat as number, group[0].loadLon as number);
+          drawLoadPin(group[0], group[0].loadLat as number, group[0].loadLon as number, false);
+          return;
+        }
+        if (group.length < 5 && zoom >= SMALL_EXPAND_ZOOM) {
+          drawScattered(group, true);
           return;
         }
         const clat = group.reduce((sum, item) => sum + (item.loadLat as number), 0) / group.length;
@@ -3393,26 +3405,24 @@ function MapScreen({ openLoad, goList, hasActiveSearch, searchLoads, onNewSearch
         const clusterMarker = L.marker([clat, clon], { icon: clusterIcon }).addTo(layer);
         clusterMarker.on('click', (event: any) => {
           if (event?.originalEvent) L.DomEvent.stopPropagation(event.originalEvent);
-          const map = mapRef.current;
           const lats = group.map((item) => item.loadLat as number);
           const lons = group.map((item) => item.loadLon as number);
           const spread = Math.max(Math.max(...lats) - Math.min(...lats), Math.max(...lons) - Math.min(...lons));
-          if (spread > cellDeg * 0.4 && map) {
-            map.flyTo([clat, clon], Math.min(zoom + 2, 13), { duration: 0.5 });
+          if (spread > cellDeg * 0.4 && map0) {
+            map0.flyTo([clat, clon], Math.min(zoom + 2, 13), { duration: 0.5 });
           } else {
             setExpandedLoads(group);
           }
         });
       });
       if (expandedLoads.length) {
-        drawScattered(expandedLoads.filter((load) => inView(load.loadLat as number, load.loadLon as number)));
+        drawScattered(expandedLoads.slice(), true);
       }
     }
 
     if (hasActiveSearch) {
       filtered.forEach((load) => {
         if (typeof load.unloadLat !== 'number' || typeof load.unloadLon !== 'number') return;
-        if (!inView(load.unloadLat, load.unloadLon)) return;
         const destIcon = L.divIcon({
           className: 'dest-pin-wrap',
           html: '<span class="dest-pin"></span>',
@@ -3426,7 +3436,7 @@ function MapScreen({ openLoad, goList, hasActiveSearch, searchLoads, onNewSearch
         });
       });
     }
-  }, [filtered, hasActiveSearch, geoCenter, mapView, expandedLoads]);
+  }, [filtered, hasActiveSearch, geoCenter, mapView?.zoom, expandedLoads]);
 
   useEffect(() => {
     if (hasActiveSearch || zoneOnly) return;
@@ -4076,7 +4086,9 @@ function SettingsScreen({
   onToggleGroup,
   onClearData,
   onOpenSaved,
-  savedOffersCount
+  savedOffersCount,
+  theme,
+  setTheme
 }: {
   status: WhatsappStatus;
   settings: LocalSettings;
@@ -4092,6 +4104,8 @@ function SettingsScreen({
   onClearData: () => void;
   onOpenSaved: () => void;
   savedOffersCount: number;
+  theme: string;
+  setTheme: (value: string) => void;
 }) {
   const activeGroupCount = groups.filter((group) => group.isActive).length;
   const defaultConnectionOrder: Array<'whatsapp' | 'viber'> = ['whatsapp', 'viber'];
@@ -4369,6 +4383,13 @@ function SettingsScreen({
             <RowIcon icon={<Bell size={17} />} title="Notificări" subtitle={settings.notificationsEnabled ? 'Active' : 'Oprite'} />
             <label className="switch">
               <input type="checkbox" checked={settings.notificationsEnabled} onChange={() => onToggleSettings({ notificationsEnabled: !settings.notificationsEnabled })} />
+              <span />
+            </label>
+          </div>
+          <div className="compact-row">
+            <RowIcon icon={<Sun size={17} />} title="Mod luminos" subtitle={theme === 'light' ? 'Activ' : 'Oprit'} />
+            <label className="switch">
+              <input type="checkbox" checked={theme === 'light'} onChange={() => setTheme(theme === 'light' ? 'dark' : 'light')} />
               <span />
             </label>
           </div>
